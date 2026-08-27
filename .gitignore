@@ -1,67 +1,25 @@
-# Environment / secrets
+# Environment secrets
 .env
-.env.*
-!.env.example
 
-# Python
+# Python environments
+.venv/
+backend/.venv/
+
+# Python cache
 __pycache__/
 *.py[cod]
-*.pyo
-.venv/
-venv/
-env/
 
-# Node
-node_modules/
-.next/
-out/
-dist/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Local/private data
-data/private/*
-!data/private/.gitkeep
-
-uploads/
-outputs/
-
-# Local databases
+# Private databases
+data/private/
 *.db
 *.sqlite
 *.sqlite3
 
-# Vector databases
-chroma/
-chromadb/
+# Local vector databases
 vectorstore/
-faiss_index/
 
-# AI models
-models/*
-!models/.gitkeep
-
-*.gguf
-*.safetensors
-*.bin
-*.pt
-*.pth
+# Runtime outputs
+outputs/
 
 # Logs
 *.log
-logs/
-
-# Temporary files
-tmp/
-temp/
-
-# Python tooling
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/

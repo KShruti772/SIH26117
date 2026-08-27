@@ -1,0 +1,37 @@
+# Ignore python virtual environments and dependencies
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Ignore local private databases and SQLite session trails
+data/private/*.db
+data/private/*.sqlite
+data/private/*.sqlite3
+!data/private/.gitkeep
+
+# Ignore vector databases
+vectorstore/
+chromadb/
+chroma/
+
+# Ignore compiled local deliverable outputs
+outputs/*
+!outputs/.gitkeep
+sandbox_runs/
+
+# Ignore development logs
+*.log
+logs/
+
+# Ignore local IDE directories and agent configuration settings
+.git/
+.gitignore
+.vscode/
+.idea/
+.agents/
+.gemini/
+deployment/docker/
