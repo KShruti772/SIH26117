@@ -1,0 +1,95 @@
+import { env } from "../config/env";
+import { getToken, clearToken } from "../security/token";
+
+export class ApiError extends Error {
+  status: number;
+  detail: any;
+
+  constructor(message: string, status: number, detail: any = null) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+interface RequestOptions extends RequestInit {
+  params?: Record<string, string>;
+}
+
+/**
+ * Core HTTP Request wrapper with JWT interception and status translation
+ */
+export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { params, headers: customHeaders, body, ...init } = options;
+
+  // 1. Build URL with query params if provided
+  let url = `${env.apiUrl}${path}`;
+  if (params) {
+    const searchParams = new URLSearchParams(params);
+    url += `?${searchParams.toString()}`;
+  }
+
+  // 2. Set defaults headers
+  const headers = new Headers(customHeaders);
+  
+  // Attach JWT bearer token if exists
+  const token = getToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  // Automatically content-type to JSON unless sending multipart/FormData
+  if (body && !(body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  try {
+    const response = await fetch(url, {
+      ...init,
+      body,
+      headers,
+    });
+
+    // 3. Handle success responses
+    if (response.ok) {
+      // Return null for 204 or empty replies
+      if (response.status === 204) {
+        return null as unknown as T;
+      }
+      return await response.json() as T;
+    }
+
+    // 4. Handle error responses (parse API detail objects safely)
+    let errMessage = `Request failed with status ${response.status}`;
+    let detailObj: any = null;
+
+    try {
+      const data = await response.json();
+      detailObj = data.detail;
+      if (typeof data.detail === "string") {
+        errMessage = data.detail;
+      } else if (data.detail && typeof data.detail === "object") {
+        errMessage = JSON.stringify(data.detail);
+      }
+    } catch {
+      // Response was not JSON
+    }
+
+    // Intercept session expirations
+    if (response.status === 401) {
+      clearToken();
+      if (typeof window !== "undefined") {
+        // Safe navigation or alert could trigger here
+      }
+    }
+
+    throw new ApiError(errMessage, response.status, detailObj);
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+    // Convert network timeout/connection failures into safe text
+    throw new ApiError("Local area network service is currently unreachable.", 503);
+  }
+}
