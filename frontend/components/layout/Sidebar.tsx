@@ -12,6 +12,7 @@ import {
   History, 
   Settings 
 } from "lucide-react";
+import { useAuth } from "../providers/AuthProvider";
 
 export type TabId = 
   | "dashboard"
@@ -46,6 +47,16 @@ const NAVIGATION_ITEMS: NavigationItem[] = [
 ];
 
 export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
+  const { user } = useAuth();
+
+  // Role-aware navigation filters: audit is restricted to admin only
+  const filteredItems = NAVIGATION_ITEMS.filter((item) => {
+    if (item.id === "audit") {
+      return user?.role === "admin";
+    }
+    return true;
+  });
+
   return (
     <aside className="w-[260px] bg-[#0c1220] border-r border-white/5 flex flex-col shrink-0">
       {/* Brand Header */}
@@ -61,7 +72,7 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
 
       {/* Navigation List */}
       <nav className="flex-1 px-4 py-6 space-y-1">
-        {NAVIGATION_ITEMS.map((item) => {
+        {filteredItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
           
@@ -72,10 +83,10 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
               className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-all cursor-pointer ${
                 isActive 
                   ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" 
-                  : "text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent"
+                  : "text-slate-450 hover:bg-white/5 hover:text-slate-200 border border-transparent"
               }`}
             >
-              <Icon className={`h-4.5 w-4.5 ${isActive ? "text-blue-400" : "text-slate-400"}`} />
+              <Icon className={`h-4.5 w-4.5 ${isActive ? "text-blue-400" : "text-slate-450"}`} />
               <span>{item.label}</span>
             </button>
           );

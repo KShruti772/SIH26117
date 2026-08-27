@@ -2,7 +2,8 @@
 
 import React, { useState } from "react";
 import AppShell from "../components/layout/AppShell";
-import { TabId } from "../components/layout/Sidebar";
+import Sidebar, { TabId } from "../components/layout/Sidebar";
+import AuthGuard from "../components/layout/AuthGuard";
 import { 
   ShieldCheck, 
   Terminal, 
@@ -283,8 +284,10 @@ export default function Home() {
   };
 
   return (
-    <AppShell activeTab={activeTab} setActiveTab={setActiveTab}>
-      {renderContent()}
-    </AppShell>
+    <AuthGuard>
+      <AppShell activeTab={activeTab} setActiveTab={setActiveTab}>
+        {renderContent()}
+      </AppShell>
+    </AuthGuard>
   );
 }

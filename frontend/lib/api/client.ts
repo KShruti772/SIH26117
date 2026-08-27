@@ -53,7 +53,6 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 
     // 3. Handle success responses
     if (response.ok) {
-      // Return null for 204 or empty replies
       if (response.status === 204) {
         return null as unknown as T;
       }
@@ -76,12 +75,29 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
       // Response was not JSON
     }
 
-    // Intercept session expirations
-    if (response.status === 401) {
-      clearToken();
-      if (typeof window !== "undefined") {
-        // Safe navigation or alert could trigger here
-      }
+    // 5. Clean translation of standard HTTP status codes
+    switch (response.status) {
+      case 401:
+        clearToken();
+        errMessage = "Token signature has expired or is invalid. Please log in again.";
+        break;
+      case 403:
+        errMessage = "Access denied. You do not have the required permissions for this action.";
+        break;
+      case 404:
+        errMessage = "The requested resource could not be found on the server.";
+        break;
+      case 422:
+        errMessage = `Validation failed: ${errMessage || "Invalid request fields format."}`;
+        break;
+      case 429:
+        errMessage = "Rate limit exceeded. Please wait before submitting more requests.";
+        break;
+      case 500:
+        errMessage = "Internal server error. The sovereign node encountered an unexpected fault.";
+        break;
+      default:
+        break;
     }
 
     throw new ApiError(errMessage, response.status, detailObj);

@@ -1,33 +1,24 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { Shield, ShieldAlert, ShieldCheck, LogOut, User as UserIcon } from "lucide-react";
-import { authApi, User } from "../../lib/api/auth";
+import { ShieldAlert, ShieldCheck, LogOut, User as UserIcon } from "lucide-react";
+import { useAuth } from "../providers/AuthProvider";
+import { env } from "../../lib/config/env";
 
 export default function Header() {
-  const [user, setUser] = useState<User | null>(null);
+  const { user, logout } = useAuth();
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // 1. Fetch backend health state
-    fetch("/health")
+    // Check backend health state
+    fetch(`${env.apiUrl}/health`)
       .then((res) => res.json())
       .then((data) => setBackendHealthy(data.status === "ok"))
       .catch(() => setBackendHealthy(false));
-
-    // 2. Fetch current profile if authenticated
-    authApi.getProfile()
-      .then((profile) => setUser(profile))
-      .catch(() => setUser(null));
   }, []);
 
-  const handleLogout = () => {
-    authApi.logout();
-    window.location.reload();
-  };
-
   return (
-    <header className="h-16 border-b border-white/5 bg-[#0e1626]/80 backdrop-blur-md px-6 flex items-center justify-between shrink-0">
+    <header className="h-16 border-b border-white/5 bg-[#0e1626]/85 backdrop-blur-md px-6 flex items-center justify-between shrink-0">
       {/* Security Brand Title */}
       <div className="flex items-center space-x-3">
         <span className="text-xs uppercase tracking-[0.2em] text-blue-400 font-semibold font-mono">
@@ -61,12 +52,12 @@ export default function Header() {
               <span className="text-sm font-medium text-slate-200">{user.username}</span>
               <span className="text-[10px] font-mono text-blue-400 uppercase tracking-wider">{user.role}</span>
             </div>
-            <div className="h-8 w-8 rounded bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-              <UserIcon className="h-4 w-4" />
+            <div className="h-8 w-8 rounded bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400 font-mono text-xs font-semibold uppercase">
+              {user.username.slice(0, 2)}
             </div>
             <button
-              onClick={handleLogout}
-              className="text-slate-400 hover:text-rose-400 transition-colors p-1.5 hover:bg-rose-500/10 rounded cursor-pointer"
+              onClick={logout}
+              className="text-slate-450 hover:text-rose-400 transition-colors p-1.5 hover:bg-rose-500/10 rounded cursor-pointer"
               title="Logout"
               aria-label="Logout"
             >
