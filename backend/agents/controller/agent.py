@@ -53,6 +53,7 @@ class AgentPlan:
         self.current_step_index = 0
         self.final_output = None
         self.status = "PENDING"  # PENDING, RUNNING, COMPLETED, FAILED
+        self.inference_mode = "real"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,7 +61,8 @@ class AgentPlan:
             "steps": [s.to_dict() for s in self.steps],
             "current_step_index": self.current_step_index,
             "final_output": self.final_output,
-            "status": self.status
+            "status": self.status,
+            "inference_mode": self.inference_mode
         }
 
 class AgentController:
@@ -180,7 +182,7 @@ class AgentController:
             # Fallback to simulated offline response in test or non-downloaded environments
             return f"Simulated text response for capability model: {runtime_model_name}"
 
-    async def _execute_step(self, plan: AgentPlan, step: AgentStep) -> bool:
+    async def _execute_step(self, plan: AgentPlan, step: AgentStep, current_user: Optional[Any] = None) -> bool:
         """Resolves models, swaps VRAM memory configurations, and dispatches tool commands."""
         step.status = "RUNNING"
         
@@ -239,7 +241,11 @@ class AgentController:
                 if action == "rag_search":
                     if self.rag_service:
                         query = step.input.get("query", "")
-                        res = self.rag_service.search(query)
+                        filter_meta = None
+                        if current_user:
+                            if current_user.get("role") != "admin":
+                                filter_meta = {"owner_id": current_user.get("id")}
+                        res = self.rag_service.search(query, filter_metadata=filter_meta)
                         step.output = res
                     else:
                         step.output = "NOT_IMPLEMENTED: RAG service is unavailable."
@@ -253,9 +259,13 @@ class AgentController:
                             context = "\n".join(chunk.get("text", "") for chunk in prev.output)
                     prompt = f"Context: {context}\nGenerate grounded answer."
                     step.output = await self._call_llm(model_profile["runtime_model_name"], prompt)
+                    if isinstance(step.output, str) and step.output.startswith("Simulated text response"):
+                        plan.inference_mode = "mock"
                 else:
                     prompt = step.input.get("prompt", "")
                     step.output = await self._call_llm(model_profile["runtime_model_name"], prompt)
+                    if isinstance(step.output, str) and step.output.startswith("Simulated text response"):
+                        plan.inference_mode = "mock"
                     
             elif step.capability == "vision" or step.capability == "multimodal":
                 if self.ocr_service:
@@ -279,7 +289,7 @@ class AgentController:
             step.status = "FAILED"
             return False
 
-    async def run(self, request: str) -> Dict[str, Any]:
+    async def run(self, request: str, current_user: Optional[Any] = None) -> Dict[str, Any]:
         """Orchestrates agent planning, step loops, verifications, and failure replans."""
         from backend.security.audit import AuditLogger
         
@@ -316,7 +326,7 @@ class AgentController:
             step_start = time.perf_counter()
             
             # Execute step
-            success = await self._execute_step(plan, step)
+            success = await self._execute_step(plan, step, current_user)
             duration_ms = int((time.perf_counter() - step_start) * 1000)
             steps_executed += 1
             

@@ -1,56 +1,53 @@
-/**
- * RAG / Knowledge Base API Stubs
- * 
- * DESIGN NOTICE:
- * These stubs represent client-side interfaces that will map to future backend endpoints.
- * The underlying local RAG logic (DocumentLoader, RecursiveTextSplitter, Chroma vector DB)
- * is already verified on the backend, and will be exposed through API routers in a future task.
- */
+import { apiFetch } from "./client";
 
 export interface DocumentInfo {
-  document_id: string;
+  id: string;
   filename: string;
-  source_path: string;
-  ingested_at: number;
-}
-
-export interface SearchResult {
-  chunk_id: string;
-  text: string;
-  distance: number;
-  metadata: {
-    document_id: string;
-    filename: string;
-    page_number: number;
-    chunk_id: string;
-  };
+  status: string;
+  uploaded_at: number;
 }
 
 export const ragApi = {
   /**
-   * Future GET /api/rag/documents
-   * Lists all indexed documents.
+   * GET /documents
+   * Lists all indexed documents in the local vector database.
    */
   async listDocuments(): Promise<DocumentInfo[]> {
-    console.warn("RAG API: listDocuments stub invoked.");
-    return [];
+    return apiFetch<DocumentInfo[]>("/documents", {
+      method: "GET",
+    });
   },
 
   /**
-   * Future POST /api/rag/ingest
-   * Ingests a new document file.
+   * POST /documents/upload
+   * Ingests a new document file via multipart/form-data.
    */
-  async ingestDocument(file: File): Promise<{ document_id: string; filename: string }> {
-    console.warn("RAG API: ingestDocument stub invoked.", file.name);
-    return { document_id: "stub-id", filename: file.name };
+  async ingestDocument(file: File): Promise<DocumentInfo> {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiFetch<DocumentInfo>("/documents/upload", {
+      method: "POST",
+      body: formData,
+    });
   },
 
   /**
-   * Future POST /api/rag/search
-   * Performs vector similarity search.
+   * POST /documents/{id}/index
+   * Triggers manual re-indexing of a document.
    */
-  async search(query: string, topK: number = 3): Promise<SearchResult[]> {
-    console.warn("RAG API: search stub invoked.", query);
-    return [];
+  async reindexDocument(id: string): Promise<{ id: string; status: string; message: string }> {
+    return apiFetch<{ id: string; status: string; message: string }>(`/documents/${id}/index`, {
+      method: "POST",
+    });
+  },
+
+  /**
+   * DELETE /documents/{id}
+   * Removes vector mappings and deletes physical document storage.
+   */
+  async deleteDocument(id: string): Promise<{ status: string; message: string }> {
+    return apiFetch<{ status: string; message: string }>(`/documents/${id}`, {
+      method: "DELETE",
+    });
   }
 };

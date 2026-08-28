@@ -1,24 +1,25 @@
-/**
- * Dynamic Model Loader API Stubs
- * 
- * DESIGN NOTICE:
- * These stubs represent client-side interfaces that will map to future backend endpoints.
- * The underlying loader manager handles dynamic swapping and VRAM allocations, and will 
- * be exposed via API routers in a future task.
- */
+import { apiFetch } from "./client";
 
 export interface ModelProfile {
   model_id: string;
-  name: string;
-  runtime: string;
+  display_name: string;
   runtime_model_name: string;
-  type: string;
-  description: string;
-  requirements: {
-    vram_gb: number;
-    ram_gb: number;
-  };
+  provider: string;
+  runtime: string;
   capabilities: string[];
+  model_type: string;
+  context_length: number;
+  quantization: string;
+  estimated_vram_gb: number;
+  estimated_ram_gb: number;
+  priority: number;
+  enabled: boolean;
+  requires_gpu: boolean;
+  supports_cpu: boolean;
+  supports_vision: boolean;
+  supports_code: boolean;
+  supports_text: boolean;
+  status: string;
 }
 
 export interface ModelLoaderStatus {
@@ -26,33 +27,31 @@ export interface ModelLoaderStatus {
   model_id: string;
   active_model: string;
   details?: string;
+  warning?: string;
 }
 
 export const modelsApi = {
   /**
-   * Future GET /api/models/registry
    * Retrieves all registered local AI models and their metadata profiles.
    */
   async listRegistry(): Promise<ModelProfile[]> {
-    console.warn("Models API: listRegistry stub invoked.");
-    return [];
+    return apiFetch<ModelProfile[]>("/models");
   },
 
   /**
-   * Future GET /api/models/running
-   * Lists currently loaded inference models in VRAM.
+   * Retrieves the currently selected/active model profile.
    */
-  async getRunning(): Promise<string[]> {
-    console.warn("Models API: getRunning stub invoked.");
-    return [];
+  async getCurrentModel(): Promise<ModelProfile> {
+    return apiFetch<ModelProfile>("/models/current");
   },
 
   /**
-   * Future POST /api/models/switch
    * Initiates dynamic VRAM model load/unload sequence.
    */
   async switchModel(modelId: string): Promise<ModelLoaderStatus> {
-    console.warn("Models API: switchModel stub invoked.", modelId);
-    return { status: "success", model_id: modelId, active_model: modelId };
+    return apiFetch<ModelLoaderStatus>("/models/select", {
+      method: "POST",
+      body: JSON.stringify({ model_id: modelId })
+    });
   }
 };

@@ -39,6 +39,21 @@ class ModelLoaderManager:
         from backend.app.config.settings import settings
         self.base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
         self.lock = asyncio.Lock()
+        self.current_model_id: Optional[str] = None
+        
+    async def get_current_model_id(self) -> Optional[str]:
+        """Cross-references loaded VRAM model names against the configuration registry."""
+        try:
+            running = await self.get_running_models()
+            if running:
+                models = self.registry_manager.get_all_models(include_disabled=True)
+                for m in models:
+                    target = m["runtime_model_name"]
+                    if any(target == r or r.startswith(target + ":") or target.startswith(r + ":") for r in running):
+                        return m["model_id"]
+            return None
+        except Exception:
+            return None
         
     def _send_request(self, path: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 5.0) -> Dict[str, Any]:
         """Performs blocking synchronous HTTP requests to local Ollama runtime."""
@@ -216,6 +231,7 @@ class ModelLoaderManager:
             
             if is_active:
                 logger.info(f"Model '{model_id}' is already active. Skipping swap.")
+                self.current_model_id = model_id
                 AuditLogger.log_event(
                     action="MODEL_SWITCH",
                     component="models.loaders.manager",
@@ -284,6 +300,7 @@ class ModelLoaderManager:
                 metadata={"model_id": model_id, "duration_ms": duration_ms}
             )
             
+            self.current_model_id = model_id
             return {
                 "status": "success",
                 "model_id": model_id,
