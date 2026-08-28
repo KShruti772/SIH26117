@@ -7,7 +7,7 @@
 * **Date:** 2026-08-27
 * **Current branch:** feature/mvp-foundation
 * **Current commit:** 72a6226 (Initial project structure for Aegis)
-* **Overall completion:** 80% (FastAPI server backbone, Model Registry, Dynamic Model Loader, Code Sandbox, RAG pipeline, OCR logic, and Frontend AI Assistant integration verified)
+* **Overall completion:** 95% (FastAPI server backbone, Model Registry, Dynamic Model Loader, Code Sandbox, RAG pipeline, OCR logic, and Frontend Model Swapper verified)
 * **Current working version:** v0.0.1-alpha (Scaffold Only)
 
 ---
@@ -70,3 +70,6 @@
 | **T15.1** | Implement Next.js App Router Frontend Foundation | P0 | 🟢 VERIFIED | Frontend Dev | T02 | Build static bundle and run import validations |
 | **T15.2** | Integrate Frontend Authentication & Security Guard | P0 | 🟢 VERIFIED | Frontend Dev | T15.1, T11 | Run Node.js native test runner and build checks |
 | **T15.3** | Integrate Frontend AI Assistant Chat Workspace | P0 | 🟢 VERIFIED | Frontend Dev | T15.2, T10 | Run native Node.js tests, FastAPI route mocks, and build checks |
+| **T15.4** | Integrate Frontend Knowledge & RAG UI workspace | P0 | 🟢 VERIFIED | Frontend Dev | T15.3, T06 | Run native Node.js tests, FastAPI RAG routes, and build checks |
+| **T15.5** | Implement RAG Ingestion & Vector Search Hardening | P0 | 🟢 VERIFIED | Frontend Dev | T15.4, T11 | Run RAG security test suite, FastAPI overrides, and build checks |
+| **T15.6** | Implement Real AI Inference & Model Swapper dashboard | P0 | 🟢 VERIFIED | Frontend Dev | T15.5, T02 | Run model management unit test suite, and Next.js Turbopack build |

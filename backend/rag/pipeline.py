@@ -154,8 +154,15 @@ class AegisRagService:
         basename = os.path.basename(file_path)
         return hashlib.sha256(basename.encode("utf-8")).hexdigest()
 
-    def ingest_document(self, file_path: str, chunk_size: int = 500, chunk_overlap: int = 50) -> str:
-        """Reads document, splits text, embeds chunks locally, and commits records to persistent ChromaDB."""
+    def ingest_document(
+        self, 
+        file_path: str, 
+        chunk_size: int = 500, 
+        chunk_overlap: int = 50,
+        owner_id: Optional[int] = None,
+        owner_username: Optional[str] = None
+    ) -> str:
+        """Reads document, splits text, embeds chunks locally, and commits records to persistent ChromaDB with owner controls."""
         from backend.security.audit import AuditLogger
         
         # 1. Path Safety & Existence validations
@@ -255,7 +262,9 @@ class AegisRagService:
                     "source_path": abs_path,
                     "page_number": page_num,
                     "chunk_id": chunk_id,
-                    "ingested_at": ingest_time
+                    "ingested_at": ingest_time,
+                    "owner_id": owner_id if owner_id is not None else -1,
+                    "owner_username": owner_username if owner_username is not None else ""
                 })
                 chunk_idx += 1
                 
@@ -288,8 +297,13 @@ class AegisRagService:
             
         return doc_id
 
-    def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        """Queries the persistent database, matches vectors, and returns grounded passage text metadata."""
+    def search(
+        self, 
+        query: str, 
+        top_k: int = 3, 
+        filter_metadata: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Queries the persistent database, matches vectors, and returns grounded passage text metadata with ownership filters."""
         from backend.security.audit import AuditLogger
         import time
         start_time = time.perf_counter()
@@ -316,7 +330,8 @@ class AegisRagService:
         try:
             results = self.collection.query(
                 query_texts=[query],
-                n_results=top_k
+                n_results=top_k,
+                where=filter_metadata
             )
         except Exception as e:
             AuditLogger.log_event(
@@ -384,6 +399,8 @@ class AegisRagService:
                     "document_id": doc_id,
                     "filename": meta["filename"],
                     "source_path": meta["source_path"],
-                    "ingested_at": meta["ingested_at"]
+                    "ingested_at": meta["ingested_at"],
+                    "owner_id": meta.get("owner_id") if meta.get("owner_id") is not None else -1,
+                    "owner_username": meta.get("owner_username") if meta.get("owner_username") is not None else ""
                 }
         return list(seen_docs.values())
