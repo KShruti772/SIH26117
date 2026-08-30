@@ -46,3 +46,50 @@ def create_access_token(subject: str, role: str, expires_delta: Optional[timedel
 def decode_access_token(token: str) -> Dict[str, Any]:
     """Decodes a JWT access token using settings configuration. Raises PyJWT exceptions if invalid."""
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+
+def compute_token_hash(token: str) -> str:
+    """Computes SHA-256 hash of a JWT token for revocation index mapping."""
+    import hashlib
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def revoke_token(token: str, user_id: Optional[int] = None, username: Optional[str] = None) -> None:
+    """Inserts a token hash into SQLite revoked_tokens table to invalidate it prior to natural expiration."""
+    import sqlite3
+    from backend.security.database import get_db_path
+    token_hash = compute_token_hash(token)
+    
+    expires_at_str = None
+    try:
+        payload = decode_access_token(token)
+        exp_ts = payload.get("exp")
+        if exp_ts:
+            expires_at_str = datetime.fromtimestamp(exp_ts, tz=timezone.utc).isoformat()
+    except Exception:
+        pass
+        
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR IGNORE INTO revoked_tokens (token_hash, user_id, username, expires_at)
+            VALUES (?, ?, ?, ?)
+        """, (token_hash, user_id, username, expires_at_str))
+        conn.commit()
+    finally:
+        conn.close()
+
+def is_token_revoked(token: str) -> bool:
+    """Checks whether a token hash exists in the revoked_tokens blacklist."""
+    import sqlite3
+    from backend.security.database import get_db_path
+    token_hash = compute_token_hash(token)
+    
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM revoked_tokens WHERE token_hash = ?", (token_hash,))
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()

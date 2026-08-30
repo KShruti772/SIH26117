@@ -17,6 +17,25 @@ interface RequestOptions extends RequestInit {
   params?: Record<string, string>;
 }
 
+let isRedirectingToLogin = false;
+
+export function handleAuthExpiration(): void {
+  clearToken();
+  if (typeof window !== "undefined") {
+    // Notify AuthProvider to scrub in-memory user state
+    window.dispatchEvent(new CustomEvent("aegis:auth_expired"));
+
+    // Prevent duplicate redirects when multiple API requests receive 401 simultaneously
+    if (!isRedirectingToLogin && !window.location.pathname.startsWith("/login")) {
+      isRedirectingToLogin = true;
+      setTimeout(() => {
+        isRedirectingToLogin = false;
+      }, 3000);
+      window.location.href = "/login?expired=true";
+    }
+  }
+}
+
 /**
  * Core HTTP Request wrapper with JWT interception and status translation
  */
@@ -44,12 +63,18 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     headers.set("Content-Type", "application/json");
   }
 
+  // 3. Set request timeout via AbortController
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
   try {
     const response = await fetch(url, {
       ...init,
       body,
       headers,
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     // 3. Handle success responses
     if (response.ok) {
@@ -78,7 +103,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     // 5. Clean translation of standard HTTP status codes
     switch (response.status) {
       case 401:
-        clearToken();
+        handleAuthExpiration();
         errMessage = "Token signature has expired or is invalid. Please log in again.";
         break;
       case 403:
@@ -106,6 +131,6 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
       throw error;
     }
     // Convert network timeout/connection failures into safe text
-    throw new ApiError("Local area network service is currently unreachable.", 503);
+    throw new ApiError("Unable to connect to the AEGIS backend. Please verify that the local service is running.", 503);
   }
 }

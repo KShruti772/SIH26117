@@ -40,11 +40,11 @@ class TestSubprocessSandbox(unittest.TestCase):
         self.assertIn("ValueError: Custom test error", res["stderr"])
 
     def test_syntax_error(self):
-        """3. Verify script syntax errors are captured in stderr."""
+        """3. Verify script syntax errors are captured in stderr or error."""
         code = "def malformed_syntax("
         res = self.sandbox.execute(code)
         self.assertFalse(res["success"])
-        self.assertIn("SyntaxError", res["stderr"])
+        self.assertIn("SyntaxError", res["error"] + res["stderr"])
 
     def test_timeout(self):
         """4. Verify infinite loops or slow code trigger hard timeout terminations."""
@@ -151,26 +151,12 @@ class TestSubprocessSandbox(unittest.TestCase):
 
     def test_security_network_boundary(self):
         """
-        Verify that a script inside the sandbox CAN connect to localhost ports.
-        (Documenting Windows subprocess network jail limitations).
+        Verify that socket calls in sandbox are rejected by security policy.
         """
-        # Create a local listening socket in the parent process
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.bind(('127.0.0.1', 0))
-        server_socket.listen(1)
-        port = server_socket.getsockname()[1]
-        
-        try:
-            # Code inside sandbox tries to connect back to the parent listening port
-            code = f"import socket\ns = socket.socket()\ns.connect(('127.0.0.1', {port}))\nprint('connected!')\ns.close()"
-            res = self.sandbox.execute(code)
-            
-            # Since standard subprocesses do not restrict local network loopbacks on Windows,
-            # this connection will succeed, proving network socket calls are NOT blocked.
-            self.assertTrue(res["success"], "Subprocess loopback socket connection was blocked.")
-            self.assertIn("connected!", res["stdout"])
-        finally:
-            server_socket.close()
+        code = "import socket\ns = socket.socket()\ns.connect(('127.0.0.1', 8080))"
+        res = self.sandbox.execute(code)
+        self.assertFalse(res["success"])
+        self.assertIn("Security Rejection", res["error"])
 
 if __name__ == "__main__":
     unittest.main()

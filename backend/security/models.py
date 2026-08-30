@@ -16,6 +16,7 @@ class UserResponse(BaseModel):
     username: str
     role: str
     is_active: bool
+    must_change_password: bool = False
     created_at: str
 
 class TokenResponse(BaseModel):
@@ -23,3 +24,21 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+class UserProvisionRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=8)
+    role: str = "user"
+
+class UserStatusRequest(BaseModel):
+    is_active: bool
+
+class UserRoleRequest(BaseModel):
+    role: str
+
+class PasswordResetRequest(BaseModel):
+    password: str
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str

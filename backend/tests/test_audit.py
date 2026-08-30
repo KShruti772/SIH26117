@@ -224,7 +224,7 @@ class TestAegisAudit(unittest.TestCase):
         self.assertFalse(hasattr(AuditLogger, "update_event"))
 
     def test_audit_api_endpoint_rbac(self):
-        """18, 19. Verify that /audit is restricted to admin role only."""
+        """14, 15. Verify that /audit and /audit/summary are restricted to admin role only."""
         # 1. Register users in test DB
         self.client.post("/auth/register", json={"username": "normal_user", "password": "securepassword123"})
         self.client.post("/auth/register", json={"username": "system_admin", "password": "securepassword123"})
@@ -239,12 +239,107 @@ class TestAegisAudit(unittest.TestCase):
         # 4. Standard user accesses GET /audit -> 403 Forbidden
         res_user = self.client.get("/audit", headers={"Authorization": f"Bearer {user_tok}"})
         self.assertEqual(res_user.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Standard user accesses GET /audit/summary -> 403 Forbidden
+        res_user_sum = self.client.get("/audit/summary", headers={"Authorization": f"Bearer {user_tok}"})
+        self.assertEqual(res_user_sum.status_code, status.HTTP_403_FORBIDDEN)
         
         # 5. Admin accesses GET /audit -> 200 OK and returns logs list
         res_admin = self.client.get("/audit", headers={"Authorization": f"Bearer {admin_tok}"})
         self.assertEqual(res_admin.status_code, status.HTTP_200_OK)
         logs = res_admin.json()
         self.assertGreaterEqual(len(logs), 1)
+
+        # Admin accesses GET /audit/summary -> 200 OK
+        res_admin_sum = self.client.get("/audit/summary", headers={"Authorization": f"Bearer {admin_tok}"})
+        self.assertEqual(res_admin_sum.status_code, status.HTTP_200_OK)
+
+    def test_no_audit_mutation_endpoint_exists(self):
+        """16. Verify no application API exists for updating or deleting audit logs."""
+        self.assertFalse(hasattr(AuditLogger, "delete_event"))
+        self.assertFalse(hasattr(AuditLogger, "update_event"))
+
+        # Verify API route table has no PUT/PATCH/DELETE endpoints for /audit
+        from backend.app.main import app
+        audit_mutation_routes = [
+            route for route in app.routes
+            if hasattr(route, "path") and route.path.startswith("/audit") and any(m in route.methods for m in ["PUT", "PATCH", "DELETE"])
+        ]
+        self.assertEqual(len(audit_mutation_routes), 0)
+
+    def test_empty_audit_ledger_returns_empty_list(self):
+        """18. Verify empty audit ledger returns clean empty list []."""
+        logs = AuditLogger.query_audit_logs()
+        self.assertEqual(logs, [])
+
+    def test_login_events_audited(self):
+        """1, 2. Verify successful and failed logins create LOGIN_SUCCESS and LOGIN_FAILED events."""
+        self.client.post("/auth/register", json={"username": "login_test_user", "password": "securepassword123"})
+        
+        # Failed login
+        self.client.post("/auth/login", json={"username": "login_test_user", "password": "wrongpassword"})
+        logs_failed = AuditLogger.query_audit_logs(action="LOGIN_FAILED")
+        self.assertGreaterEqual(len(logs_failed), 1)
+        self.assertEqual(logs_failed[0]["status"], "failure")
+
+        # Successful login
+        self.client.post("/auth/login", json={"username": "login_test_user", "password": "securepassword123"})
+        logs_success = AuditLogger.query_audit_logs(action="LOGIN_SUCCESS")
+        self.assertGreaterEqual(len(logs_success), 1)
+        self.assertEqual(logs_success[0]["status"], "success")
+
+    def test_logout_event_audited(self):
+        """3. Verify logout creates LOGOUT audit event."""
+        self.client.post("/auth/register", json={"username": "logout_test_user", "password": "securepassword123"})
+        tok = self.client.post("/auth/login", json={"username": "logout_test_user", "password": "securepassword123"}).json()["access_token"]
+        
+        self.client.post("/auth/logout", headers={"Authorization": f"Bearer {tok}"})
+        logs = AuditLogger.query_audit_logs(action="LOGOUT")
+        self.assertGreaterEqual(len(logs), 1)
+        self.assertEqual(logs[0]["username"], "logout_test_user")
+
+    def test_password_change_audited(self):
+        """4. Verify password change creates PASSWORD_CHANGED audit event."""
+        self.client.post("/auth/register", json={"username": "pwd_test_user", "password": "securepassword123"})
+        tok = self.client.post("/auth/login", json={"username": "pwd_test_user", "password": "securepassword123"}).json()["access_token"]
+        
+        self.client.post(
+            "/auth/change-password",
+            json={"old_password": "securepassword123", "new_password": "newsecurepassword123"},
+            headers={"Authorization": f"Bearer {tok}"}
+        )
+        logs = AuditLogger.query_audit_logs(action="PASSWORD_CHANGED")
+        self.assertGreaterEqual(len(logs), 1)
+
+    def test_model_operations_audited(self):
+        """9, 10. Verify model select and model test create MODEL_SELECTED and MODEL_TESTED audit events."""
+        self.client.post("/auth/register", json={"username": "admin_model_user", "password": "securepassword123"})
+        admin_tok = self.client.post("/auth/login", json={"username": "admin_model_user", "password": "securepassword123"}).json()["access_token"]
+        
+        # Model select
+        self.client.post("/models/select", json={"model_id": "gemma3:4b"}, headers={"Authorization": f"Bearer {admin_tok}"})
+        logs_sel = AuditLogger.query_audit_logs(action="MODEL_SELECTED")
+        self.assertGreaterEqual(len(logs_sel), 1)
+
+        # Model test
+        self.client.post("/models/test", json={"model_id": "gemma3:4b"}, headers={"Authorization": f"Bearer {admin_tok}"})
+        logs_test = AuditLogger.query_audit_logs(action="MODEL_TESTED")
+        self.assertGreaterEqual(len(logs_test), 1)
+
+    def test_rag_and_sandbox_audited(self):
+        """12, 13. Verify RAG query and sandbox execution create RAG_QUERY and SANDBOX_EXECUTION audit events."""
+        self.client.post("/auth/register", json={"username": "rag_user", "password": "securepassword123"})
+        tok = self.client.post("/auth/login", json={"username": "rag_user", "password": "securepassword123"}).json()["access_token"]
+
+        # RAG Query
+        self.client.post("/documents/query", json={"query": "test query", "top_k": 2}, headers={"Authorization": f"Bearer {tok}"})
+        logs_rag = AuditLogger.query_audit_logs(action="RAG_QUERY")
+        self.assertGreaterEqual(len(logs_rag), 1)
+
+        # Sandbox Execution
+        self.client.post("/sandbox/execute", json={"code": "print('hello')", "timeout_seconds": 5}, headers={"Authorization": f"Bearer {tok}"})
+        logs_sb = AuditLogger.query_audit_logs(action="SANDBOX_EXECUTION")
+        self.assertGreaterEqual(len(logs_sb), 1)
 
 if __name__ == "__main__":
     unittest.main()

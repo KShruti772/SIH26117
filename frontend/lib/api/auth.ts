@@ -6,6 +6,7 @@ export interface User {
   username: string;
   role: "admin" | "user";
   is_active: boolean;
+  must_change_password?: boolean;
   created_at: string;
 }
 
@@ -64,7 +65,13 @@ export const authApi = {
   /**
    * Safely clears JWT tokens and terminates active browser tab sessions.
    */
-  logout(): void {
-    clearToken();
+  async logout(): Promise<void> {
+    try {
+      await apiFetch("/auth/logout", { method: "POST" });
+    } catch {
+      // Fail-safe: proceed to clear local token even if network fails
+    } finally {
+      clearToken();
+    }
   }
 };

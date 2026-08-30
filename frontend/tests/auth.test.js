@@ -111,10 +111,21 @@ test("Token Storage Operations - Set, Get and Clear Token", () => {
   assert.strictEqual(tokenManager.getToken(), null);
 });
 
-test("API Client Error Translation - 401 Unauthorized clears token & redirects", () => {
+test("API Client Error Translation - 401 Unauthorized clears token & triggers expiration", () => {
   mockSessionStorage.clear();
   tokenManager.setToken("active-user-jwt");
   
+  let eventDispatched = false;
+  global.window = {
+    location: { pathname: "/dashboard", href: "" },
+    dispatchEvent(evt) {
+      if (evt.type === "aegis:auth_expired") eventDispatched = true;
+    }
+  };
+  global.CustomEvent = class CustomEvent {
+    constructor(type) { this.type = type; }
+  };
+
   const apiError = translateResponseStatus(401, "Signature Expired");
   
   assert.strictEqual(apiError.status, 401);
@@ -122,28 +133,69 @@ test("API Client Error Translation - 401 Unauthorized clears token & redirects",
   assert.strictEqual(tokenManager.getToken(), null, "Token must be cleared on 401");
 });
 
-test("API Client Error Translation - 403 Forbidden maps to access denied message", () => {
+test("Simultaneous 401 Responses - Single deduplicated redirect", () => {
+  mockSessionStorage.clear();
+  tokenManager.setToken("active-jwt-token");
+  
+  let redirectCount = 0;
+  let isRedirecting = false;
+  
+  function handleDeduplicatedExpiration() {
+    tokenManager.clearToken();
+    if (!isRedirecting) {
+      isRedirecting = true;
+      redirectCount++;
+    }
+  }
+
+  // Simulate 4 concurrent 401 API failures (e.g. /health, /audit, /documents, /models)
+  handleDeduplicatedExpiration();
+  handleDeduplicatedExpiration();
+  handleDeduplicatedExpiration();
+  handleDeduplicatedExpiration();
+
+  assert.strictEqual(redirectCount, 1, "Simultaneous 401s must result in exactly ONE redirect trigger");
+  assert.strictEqual(tokenManager.getToken(), null, "Token must be cleared");
+});
+
+test("API Client Error Translation - 403 Forbidden does NOT clear authentication token", () => {
+  mockSessionStorage.clear();
+  tokenManager.setToken("valid-user-jwt");
+  
   const apiError = translateResponseStatus(403);
   assert.strictEqual(apiError.status, 403);
   assert.match(apiError.message, /Access denied/);
+  assert.strictEqual(tokenManager.getToken(), "valid-user-jwt", "403 must NOT clear authentication token");
 });
 
-test("API Client Error Translation - 422 Validation Error contains details", () => {
+test("API Client Error Translation - 422 Validation Error contains details & does NOT clear token", () => {
+  mockSessionStorage.clear();
+  tokenManager.setToken("valid-user-jwt");
+  
   const apiError = translateResponseStatus(422, "Username too short");
   assert.strictEqual(apiError.status, 422);
   assert.match(apiError.message, /Validation failed: Username too short/);
+  assert.strictEqual(tokenManager.getToken(), "valid-user-jwt", "422 must NOT clear token");
 });
 
-test("API Client Error Translation - 429 Rate Limit error returns retry warning", () => {
+test("API Client Error Translation - 429 Rate Limit error returns retry warning & preserves token", () => {
+  mockSessionStorage.clear();
+  tokenManager.setToken("valid-user-jwt");
+
   const apiError = translateResponseStatus(429);
   assert.strictEqual(apiError.status, 429);
   assert.match(apiError.message, /Rate limit exceeded/);
+  assert.strictEqual(tokenManager.getToken(), "valid-user-jwt", "429 must NOT clear token");
 });
 
-test("API Client Error Translation - 500 Internal Error returns node generic message", () => {
+test("API Client Error Translation - 500 Internal Error returns node generic message & preserves token", () => {
+  mockSessionStorage.clear();
+  tokenManager.setToken("valid-user-jwt");
+
   const apiError = translateResponseStatus(500);
   assert.strictEqual(apiError.status, 500);
   assert.match(apiError.message, /sovereign node encountered/);
+  assert.strictEqual(tokenManager.getToken(), "valid-user-jwt", "500 must NOT clear token");
 });
 
 test("Role-Aware Navigation Visibility - Admin role displays Audit logs", () => {

@@ -20,6 +20,15 @@ def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    from backend.security.auth import decode_access_token, is_token_revoked
+    
+    if is_token_revoked(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token signature has expired or is invalid. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         payload = decode_access_token(token)
         username: str = payload.get("sub")
@@ -28,11 +37,15 @@ def get_current_user(
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token signature has expired",
+            detail="Token signature has expired or is invalid. Please log in again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except jwt.InvalidTokenError:
-        raise credentials_exception
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token signature has expired or is invalid. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
         
     cursor = db.cursor()
     cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
@@ -59,9 +72,31 @@ class RoleChecker:
         self.allowed_roles = allowed_roles
 
     def __call__(self, current_user: sqlite3.Row = Depends(get_current_user)) -> sqlite3.Row:
-        if current_user["role"] not in self.allowed_roles:
+        user_role = current_user["role"] if isinstance(current_user, sqlite3.Row) or isinstance(current_user, dict) else getattr(current_user, "role", "user")
+        if user_role not in self.allowed_roles:
+            from backend.security.audit import AuditLogger
+            user_id = current_user["id"] if isinstance(current_user, sqlite3.Row) or isinstance(current_user, dict) else getattr(current_user, "id", None)
+            username = current_user["username"] if isinstance(current_user, sqlite3.Row) or isinstance(current_user, dict) else getattr(current_user, "username", "unknown")
+            
+            AuditLogger.log_event(
+                action="AUTHORIZATION_DENIED",
+                component="security.dependencies",
+                status="failure",
+                user_id=user_id,
+                username=username,
+                role=user_role,
+                metadata={
+                    "reason": "ROLE_FORBIDDEN",
+                    "allowed_roles": self.allowed_roles,
+                    "attempted_role": user_role
+                }
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Operation not permitted for this user role",
             )
         return current_user
+
+# Reusable authorization policy aliases
+RequireAuthenticated = Depends(get_current_user)
+RequireAdmin = Depends(RoleChecker(["admin"]))

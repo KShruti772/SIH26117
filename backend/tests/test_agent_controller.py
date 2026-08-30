@@ -38,12 +38,12 @@ class TestAgentController(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller._classify_capability("write python code to sum arrays"), "coding")
         self.assertEqual(self.controller._classify_capability("analyze scanned document layout"), "vision")
         self.assertEqual(self.controller._classify_capability("search company manual for standards"), "text_generation")
-        self.assertEqual(self.controller._classify_capability("summarize index keys"), "reasoning")
+        self.assertEqual(self.controller._classify_capability("summarize logic flow"), "reasoning")
 
     def test_plan_creation(self):
         """Verify planning logic compiles a sequential multi-step sequence."""
-        plan = self.controller._create_plan("write python code to sum arrays")
-        self.assertEqual(plan.request, "write python code to sum arrays")
+        plan = self.controller._create_plan("run code in sandbox to sum arrays")
+        self.assertEqual(plan.request, "run code in sandbox to sum arrays")
         self.assertEqual(len(plan.steps), 2)
         self.assertEqual(plan.steps[0].capability, "coding")
         self.assertEqual(plan.steps[0].input.get("action"), "generate_code")
@@ -54,7 +54,7 @@ class TestAgentController(unittest.IsolatedAsyncioTestCase):
         """Verify code generation and sandbox execution runs sequentially to completion."""
         self.mock_sandbox.execute.return_value = {"success": True, "stdout": "42", "stderr": "", "error": None}
         
-        res = await self.controller.run("write python code to sum arrays")
+        res = await self.controller.run("run code in sandbox to sum arrays")
         
         self.assertTrue(res["success"])
         self.assertEqual(res["plan"]["status"], "COMPLETED")

@@ -20,6 +20,20 @@ export interface AuditQueryParams {
   username?: string;
   status?: "success" | "failure";
   request_id?: string;
+  search?: string;
+  start_date?: string;
+  end_date?: string;
+}
+
+export interface AuditSummary {
+  total_events: number;
+  successful_events: number;
+  failed_actions: number;
+  security_events: number;
+  ai_operations: number;
+  rag_events: number;
+  sandbox_events: number;
+  authentication?: number;
 }
 
 /**
@@ -34,6 +48,16 @@ export const auditApi = {
     return apiFetch<AuditLog[]>("/audit", {
       method: "GET",
       params: params as Record<string, string>,
+    });
+  },
+
+  /**
+   * GET /audit/summary
+   * Retrieves real counts from SQLite database for dashboard. Restricted to admin role.
+   */
+  async getSummary(): Promise<AuditSummary> {
+    return apiFetch<AuditSummary>("/audit/summary", {
+      method: "GET",
     });
   }
 };

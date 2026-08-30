@@ -1,217 +1,188 @@
-# Aegis
+# AEGIS — Confidential Industrial Agentic AI Workbench
 
-## SIH26117 — Sovereign On-Premise Agentic AI Workbench
+Sovereign On-Premise Agentic AI Workbench using Open-Weight Multimodal LLMs for Confidential Industrial Work.
 
-Aegis is a self-hosted, modular, agentic AI workbench designed for confidential industrial work.
+---
 
-### Core Goals
+## 1. What is AEGIS?
 
-- Local AI inference
-- No external AI APIs
-- Open-weight models
-- Model routing
-- Multimodal document understanding
-- Local RAG
-- Agentic task execution
-- Code sandbox
-- Local file operations
-- Real document deliverables
-- Authentication and authorization
-- Auditability
-- Air-gapped deployment capability
+AEGIS is an on-premise, self-hosted, air-gapped Agentic AI Workbench designed for confidential industrial organizational data (oil refineries, defence, power grids, PSUs). AEGIS enables enterprise operators to analyze confidential documents, execute technical code, generate deliverables, and perform RAG semantic search without routing proprietary data to external cloud APIs (e.g., OpenAI, Anthropic, Gemini).
 
-## Architecture
+---
 
-User
-↓
-Secure Web UI
-↓
-Agent Controller
-↓
-Model Router
-↓
-Specialized Local Models
-↓
-Local Tools / RAG
-↓
-Verifier
-↓
-Deliverable
+## 2. Architecture Overview
 
-## Project Status
-
-🚧 MVP under development
-
-## Problem Statement
-
-SIH26117
-
-## Team
-
-Team Aegis
-
-## Development Setup
-
-### Backend virtual environment setup
-To initialize the backend environment on your local development machine:
-
-1. **Create the virtual environment**:
-   ```bash
-   python -m venv backend/.venv
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   backend\.venv\Scripts\python -m pip install -r backend\requirements.txt
-   ```
-
-3. **Verify backend setup**:
-   ```bash
-   backend\.venv\Scripts\python.exe -c "import fastapi, pydantic, uvicorn, dotenv; print('Core imports verified!')"
-   ```
-
-## Authentication & Authorization
-
-Aegis includes a self-contained, offline authentication system built with SQLite, bcrypt password hashing, and JWT tokens.
-
-### Configuration
-Update the `.env` file at the root of the workspace to configure token secrets and expiration times:
-```env
-# Authentication Configuration
-SECRET_KEY=replace-with-a-long-random-secret
-JWT_ALGORITHM=HS256
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60
-AUTH_DB_PATH=data/private/aegis_auth.db
-```
-> [!IMPORTANT]
-> In production environments (`APP_ENV=production`), the application will fail safely if `SECRET_KEY` remains set to the default `"CHANGE_ME"` value.
-
-### Starting the Backend
-Launch the FastAPI uvicorn daemon:
-```bash
-backend\.venv\Scripts\python.exe backend\app\main.py
+```text
+Operator / User (Browser UI)
+          │
+          ▼
+Next.js Application Shell (Localhost:3000)
+          │ (JWT Bearer Auth)
+          ▼
+FastAPI Sovereign Backend (Localhost:8000)
+    ├── Authentication & RBAC Engine (SQLite)
+    ├── Local Audit Ledger (Append-Only SQLite)
+    ├── Agent Planner & Controller
+    ├── Local Ollama LLM Manager (gemma3:4b)
+    ├── Local Vector Database (ChromaDB + all-MiniLM-L6-v2)
+    └── Subprocess Code Sandbox
 ```
 
-### API Endpoints
-* **`POST /auth/register`**: Registers a new user. Passwords must be at least 8 characters. Users with usernames containing "admin" are automatically assigned the `admin` role; others receive the `user` role.
-* **`POST /auth/login`**: Accepts `application/json` or `application/x-www-form-urlencoded` credentials. Returns a JWT access token and user info.
-* **`GET /auth/me`**: Returns the profile details for the currently authenticated bearer token. Send the header `Authorization: Bearer <token>`.
+---
 
-### Roles & Security Controls
-* **`user`**: Permitted to interact with RAG, code execution sandbox, document compilation, and request planning.
-* **`admin`**: Full access, including user administration, configuration updates, and log auditing.
-* **Brute-Force & Rate Limiting**: *Production requirement: persistent/distributed login rate limiting.*
-* **Sovereignty**: All password hashes and registration tables reside locally in `data/private/aegis_auth.db` (git-ignored) with no cloud backdoors or telemetry hooks.
+## 3. System Requirements
 
-## Audit Logging Ledger
+* **Operating System**: Windows 10 / 11 (64-bit) or Linux.
+* **Python Runtime**: Python 3.12+
+* **Node.js Runtime**: Node.js v20+ with `npm`
+* **Local Inference Engine**: Ollama daemon installed locally (`https://ollama.com`)
+* **Hardware Recommendation**: NVIDIA GPU with 6GB+ VRAM (e.g. RTX 4050/3060) or CPU with 16GB RAM.
 
-Aegis includes a structured, append-oriented local audit logging system to record security-sensitive operations.
+---
 
-### Stored Metadata
-For each logged event, the ledger parameters capture:
-* **Who**: `user_id`, `username`, and `role` (automatically resolved from context variable bindings).
-* **What**: `action` (e.g. `AUTH_LOGIN`, `MODEL_SWITCH`, `SANDBOX_EXECUTION`, `RAG_SEARCH`, `VERIFICATION`).
-* **When**: UTC `timestamp` generated automatically by SQLite.
-* **Which Component**: name of the originating code module.
-* **Correlation**: `request_id` (a unique UUID correlated across the entire execution flow).
-* **Result**: `status` ("success" or "failure"), execution `duration_ms`, and `metadata_json`.
+## 4. Internet Requirements vs Air-Gap Runtime
 
-### Excluded Sensitive Data
-To prevent privacy breaches, the audit logger enforces an allowlist of metadata keys. **It deliberately excludes**:
-* Plaintext passwords or bcrypt hashes.
-* JWT access tokens or Authorization headers.
-* User query prompt text or generated model responses.
-* Grounded passage snippets or source document contents.
-* API keys or system secrets.
+### Installation Phase (Internet Required)
+Internet connectivity is required **only during initial environment installation**:
+- Downloading Python wheels (`pip install -r backend/requirements.txt`).
+- Downloading Node modules (`npm install` in `frontend/`).
+- Downloading Ollama application installer.
+- Pulling local open-weight model tags (`ollama pull gemma3:4b`) and HuggingFace embedding weights.
 
-### Access Control
-* **`GET /audit`**: Restricted strictly to the `admin` role. Returns the system log entries. Normal users attempting access will receive a `403 Forbidden` error.
+### Runtime Phase (100% Air-Gapped Sovereign Execution)
+Once installation is complete:
+- **Zero Cloud Dependencies**: The system operates 100% offline without external internet calls.
+- **Physical Disconnect Ready**: Verified to execute cleanly with network interface adapters disabled.
 
-> [!NOTE]
-> *The MVP audit ledger is append-oriented but is not cryptographically tamper-proof.* True cryptographic signing and write-once-read-many (WORM) hardware storage are production enhancements.
+---
 
-## Private LAN Deployment
+## 5. Cross-Laptop Quick Start Guide
 
-To deploy AEGIS on a local area network (LAN) for multi-machine on-premise access:
+### Step 1: Copy Project Files
+Copy the AEGIS root folder to any directory on the target laptop (e.g., `C:\AEGIS` or `D:\Projects\AEGIS`).
 
-### 1. Configuration Settings
-Ensure the `.env` file at the workspace root is updated to listen for external traffic. Set `HOST` to `0.0.0.0` (all interfaces):
+### Step 2: Automated Environment Setup
+Open PowerShell in the project root and run the setup script:
+```powershell
+powershell .\scripts\setup.ps1
+```
+*(This script initializes `.env`, creates directories `data/private` and `vectorstore`, sets up Python virtualenv `backend/.venv`, installs dependencies, initializes SQLite schema, and installs frontend node_modules).*
+
+### Step 3: Run Diagnostic Health Check
+Verify system setup using the diagnostic script:
+```powershell
+powershell .\scripts\check-environment.ps1
+```
+
+### Step 4: Inspect & Prepare Local Ollama LLM Model
+Ensure the Ollama application is running, then inspect model weights:
+```powershell
+powershell .\scripts\prepare-models.ps1
+```
+*(Prompts user to run `ollama pull gemma3:4b` if the model is missing from local Ollama).*
+
+### Step 5: Launch Services
+Start the FastAPI backend daemon:
+```powershell
+powershell .\scripts\start-backend.ps1
+```
+
+Open a second terminal window and start the Next.js frontend:
+```powershell
+powershell .\scripts\start-frontend.ps1
+```
+
+Access the AEGIS Workbench in your browser at:
+`http://localhost:3000`
+
+---
+
+## 6. Manual Setup & Configuration
+
+### Python Backend Setup
+```powershell
+# 1. Create virtual environment
+python -m venv backend/.venv
+
+# 2. Install requirements
+backend\.venv\Scripts\python -m pip install -r backend\requirements.txt
+
+# 3. Initialize SQLite database schema
+backend\.venv\Scripts\python -c "from backend.security.database import init_db; init_db()"
+```
+
+### Node.js Frontend Setup
+```powershell
+cd frontend
+npm install
+npm run build
+```
+
+---
+
+## 7. Environment Configuration (`.env`)
+
+Configuration parameters are loaded from `.env` in the root directory:
+
 ```env
-HOST=0.0.0.0
+# Application Mode
+APP_ENV=development
+MODEL_MODE=local
+
+# Network Settings
+HOST=127.0.0.1
 PORT=8000
 OLLAMA_BASE_URL=http://localhost:11434
-```
-To restrict access to a specific Ethernet or Wi-Fi network card, bind to that specific LAN IP (e.g. `HOST=192.168.1.50`).
 
-### 2. Startup Script
-Aegis provides double-clickable launcher scripts in the `deployment/` directory to simplify startup and IP discovery on Windows:
-* **Option A: PowerShell**
-  Open a PowerShell terminal and run:
+# Storage Paths (Project Relative)
+AUTH_DB_PATH=data/private/aegis_auth.db
+VECTOR_DB_PATH=./vectorstore
+MODEL_DIR=./models
+
+# Authentication Security
+SECRET_KEY=CHANGE_ME
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60
+
+# Air-Gap Protection
+ALLOW_EXTERNAL_APIS=false
+```
+
+> [!IMPORTANT]
+> In production environments (`APP_ENV=production`), the application fails safely if `SECRET_KEY` remains set to the default `"CHANGE_ME"` placeholder value.
+
+---
+
+## 8. Verification & Testing Commands
+
+* **Run Backend Test Suite (57 Unit Tests)**:
   ```powershell
-  deployment\start_aegis.ps1
+  backend\.venv\Scripts\python -m unittest backend/tests/test_audit.py backend/tests/test_rbac.py backend/tests/test_auth.py backend/tests/test_model_management.py backend/tests/test_conversations.py backend/tests/test_embedding_generation.py backend/tests/test_similarity_retrieval.py backend/tests/test_rag_orchestration.py backend/tests/test_rag_ollama_integration.py
   ```
-* **Option B: Command Prompt / Windows Explorer**
-  Double-click `deployment\start_aegis.bat` to launch the server background processes.
 
-During execution, the startup daemon automatically queries network adapters and lists all active IPv4 LAN addresses where AEGIS can be reached.
+* **Run Frontend Unit Tests (34 Unit Tests)**:
+  ```powershell
+  cd frontend
+  node --test tests/auth.test.js tests/chat.test.js tests/rag.test.js tests/models.test.js tests/truthfulness.test.js
+  ```
 
-### 3. Verify Connection from another Machine
-From another computer on the same subnet, open a web browser or use a command utility (like `curl`) to target the host machine's LAN IP:
-```bash
-curl http://<HOST_LAN_IP>:<PORT>/health
-```
-**Expected Response:**
-```json
-{
-  "status": "ok"
-}
-```
+* **Run Frontend Production Build**:
+  ```powershell
+  cd frontend
+  npm run build
+  ```
 
-### 4. Stopping the Service
-Press `Ctrl+C` in the running PowerShell or Command Prompt console window to gracefully terminate the Uvicorn daemon.
+---
 
-## Offline Containerized Deployment
+## 9. Security Warnings & Truthfulness Policy
 
-To deploy AEGIS inside Docker containers in an air-gapped environment without active internet access:
+* **Append-Only Application Audit Log**: System audit logs are written using parameterized SQL to local SQLite tables (`data/private/aegis_auth.db`). No application endpoints exist to edit or delete audit logs.
+* **Truthfulness Requirement**: AEGIS UI displays real telemetry metrics fetched directly from local backends. Missing metrics are labeled `NOT REPORTED` or `UNAVAILABLE` rather than displaying hardcoded or simulated values.
 
-### 1. Preloading Docker Images (Connected Environment)
-Before deploying on the air-gapped machine, build the image and export it to a tar archive on a machine with internet access:
-```bash
-# Build the backend container image
-docker build -t aegis-backend:latest -f backend/Dockerfile .
+---
 
-# Save the image to a tarball archive
-docker save -o aegis-backend-latest.tar aegis-backend:latest
-```
-Copy `aegis-backend-latest.tar` to the air-gapped server machine via physical media (e.g. USB drive).
+## 10. Troubleshooting
 
-### 2. Loading and Starting the Stack (Air-Gapped Environment)
-On the air-gapped server, load the archived image:
-```bash
-# Load the prebuilt image from the tar archive
-docker load -i aegis-backend-latest.tar
-
-# Run the stack using Docker Compose
-cd deployment/docker
-docker compose up -d
-```
-
-### 3. Persistent Volumes
-The `docker-compose.yml` mounts host directories using bind mounts to survive container recreation. The following directories are mapped:
-* `data/private` -> `/app/data/private` (authentication & audit log SQLite database)
-* `vectorstore` -> `/app/vectorstore` (local ChromaDB indices)
-* `outputs` -> `/app/outputs` (generated docx/xlsx/pdf files)
-
-### 4. Connecting to local Ollama on the GPU host
-If the local Ollama daemon is running directly on the GPU host machine (rather than inside a docker container), update `.env` to route requests to the docker gateway:
-```env
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-```
-
-### 5. Verify Health and Shutdown
-* **Health Check**: Run `docker ps` to verify that the container is healthy (using the `/health` endpoint check).
-* **Terminate Stack**: Run `docker compose down` in the `deployment/docker` directory.
-
-
-
-
+* **Ollama Connection Refused**: Verify Ollama app is running (`http://localhost:11434/api/tags`).
+* **Database Errors**: Delete temporary test DB files or run `powershell .\scripts\setup.ps1` to re-initialize schema.
+* **401 Session Expired**: Expired JWT tokens automatically trigger local token clearance and single navigation redirect to `/login?expired=true`.

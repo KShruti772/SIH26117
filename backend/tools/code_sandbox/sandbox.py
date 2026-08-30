@@ -5,7 +5,7 @@ import time
 import shutil
 import subprocess
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger("aegis.sandbox")
 
@@ -42,6 +42,28 @@ class SubprocessSandbox(BaseSandbox):
         self.workspace_parent = os.path.abspath(workspace_parent)
         self.output_limit_bytes = output_limit_bytes
         os.makedirs(self.workspace_parent, exist_ok=True)
+
+    @staticmethod
+    def _validate_ast_safety(code: str) -> Optional[str]:
+        """Statically inspects Python code AST for forbidden module imports."""
+        import ast
+        forbidden_modules = {"ctypes", "winreg", "subprocess", "socket", "importlib", "shutil"}
+        try:
+            tree = ast.parse(code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        mod = alias.name.split(".")[0]
+                        if mod in forbidden_modules:
+                            return f"Forbidden module import detected: '{alias.name}'"
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        mod = node.module.split(".")[0]
+                        if mod in forbidden_modules:
+                            return f"Forbidden module import detected: '{node.module}'"
+        except SyntaxError as e:
+            return f"Syntax error in code string: {e}"
+        return None
 
     def execute(self, code: str, timeout_seconds: float = 10.0) -> Dict[str, Any]:
         """Executes Python code in a separate process, managing execution limits and cleanup."""
@@ -82,14 +104,39 @@ class SubprocessSandbox(BaseSandbox):
                 "error": "Rejected: Timeout must be a positive float between 0.1 and 60.0 seconds."
             }
 
+        # AST Pre-Execution Security Inspection
+        ast_violation = self._validate_ast_safety(code)
+        if ast_violation:
+            AuditLogger.log_event(
+                action="SANDBOX_EXECUTION",
+                component="tools.code_sandbox.sandbox",
+                status="failure",
+                metadata={"error_category": "ast_forbidden_import"}
+            )
+            return {
+                "success": False,
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": "",
+                "timed_out": False,
+                "duration_ms": 0,
+                "error": f"Security Rejection: {ast_violation}"
+            }
+
         # 2. Setup isolated temporary workspace
         run_id = f"run_{uuid.uuid4()}"
         run_dir = os.path.join(self.workspace_parent, run_id)
         os.makedirs(run_dir, exist_ok=True)
         
+        socket_block_prefix = (
+            "import socket\n"
+            "def _blocked_socket(*args, **kwargs):\n"
+            "    raise PermissionError('Sandbox Security Violation: Network socket creation is blocked.')\n"
+            "socket.socket = _blocked_socket\n\n"
+        )
         script_path = os.path.join(run_dir, "script.py")
         with open(script_path, "w", encoding="utf-8") as f:
-            f.write(code)
+            f.write(socket_block_prefix + code)
 
         # 3. Environment restriction
         # Scrub all parent variables (secrets, DB URLs, API keys)

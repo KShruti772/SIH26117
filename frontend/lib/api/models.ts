@@ -7,19 +7,17 @@ export interface ModelProfile {
   provider: string;
   runtime: string;
   capabilities: string[];
-  model_type: string;
-  context_length: number;
-  quantization: string;
-  estimated_vram_gb: number;
-  estimated_ram_gb: number;
-  priority: number;
-  enabled: boolean;
-  requires_gpu: boolean;
-  supports_cpu: boolean;
-  supports_vision: boolean;
-  supports_code: boolean;
-  supports_text: boolean;
   status: string;
+  is_installed?: boolean;
+  is_active?: boolean;
+  size_bytes?: number;
+  modified_at?: string;
+  parameter_size?: string;
+  quantization?: string;
+  estimated_vram_gb?: number;
+  format?: string;
+  family?: string;
+  notes?: string;
 }
 
 export interface ModelLoaderStatus {
@@ -30,9 +28,17 @@ export interface ModelLoaderStatus {
   warning?: string;
 }
 
+export interface ModelTestResult {
+  status: "PASS" | "FAIL";
+  model: string;
+  latency_ms: number;
+  response?: string;
+  error?: string;
+}
+
 export const modelsApi = {
   /**
-   * Retrieves all registered local AI models and their metadata profiles.
+   * Retrieves all discovered local AI models and their metadata profiles.
    */
   async listRegistry(): Promise<ModelProfile[]> {
     return apiFetch<ModelProfile[]>("/models");
@@ -46,10 +52,20 @@ export const modelsApi = {
   },
 
   /**
-   * Initiates dynamic VRAM model load/unload sequence.
+   * Initiates dynamic model switch sequence.
    */
   async switchModel(modelId: string): Promise<ModelLoaderStatus> {
     return apiFetch<ModelLoaderStatus>("/models/select", {
+      method: "POST",
+      body: JSON.stringify({ model_id: modelId })
+    });
+  },
+
+  /**
+   * Executes deterministic test inference against target local model.
+   */
+  async testInference(modelId?: string): Promise<ModelTestResult> {
+    return apiFetch<ModelTestResult>("/models/test", {
       method: "POST",
       body: JSON.stringify({ model_id: modelId })
     });

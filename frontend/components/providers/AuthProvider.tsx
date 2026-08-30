@@ -35,17 +35,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // Listen for global auth expiration event dispatched by apiFetch
+  useEffect(() => {
+    const handleExpired = () => {
+      setUser(null);
+      setError(null);
+      setLoading(false);
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("aegis:auth_expired", handleExpired);
+    }
+    return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("aegis:auth_expired", handleExpired);
+      }
+    };
+  }, []);
+
   // Hydrate session profile on page mount
   useEffect(() => {
+    console.log("[AEGIS AUTH] App initialization started");
     const token = getToken();
     if (!token) {
+      console.log("[AEGIS AUTH] No active token found in storage. Initialization completed.");
       setLoading(false);
       return;
     }
 
+    console.log("[AEGIS AUTH] Token found. Restoring active profile...");
+
+    // Fail-safe max 4-second timeout to prevent infinite loading screens
+    const safetyTimeout = setTimeout(() => {
+      console.warn("[AEGIS AUTH] Safety timeout reached during auth hydration. Unblocking UI.");
+      setLoading(false);
+    }, 4000);
+
     refreshProfile()
-      .catch(() => {})
+      .then(() => {
+        console.log("[AEGIS AUTH] Session profile restored successfully.");
+      })
+      .catch((err) => {
+        console.warn("[AEGIS AUTH] Session profile restoration failed:", err?.message || err);
+        setUser(null);
+        if (err?.status === 401 || err?.status === 403) {
+          clearToken();
+        }
+      })
       .finally(() => {
+        clearTimeout(safetyTimeout);
+        console.log("[AEGIS AUTH] Auth initialization completed.");
         setLoading(false);
       });
   }, []);
@@ -68,6 +107,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     authApi.logout();
     setUser(null);
     setError(null);
+    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+      window.location.href = "/login";
+    }
   };
 
   return (

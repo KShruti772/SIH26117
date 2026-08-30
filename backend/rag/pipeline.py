@@ -130,6 +130,26 @@ class AegisRagService:
             name="aegis_knowledge",
             embedding_function=self.embedding_fn
         )
+        self._verify_collection_compatibility()
+
+    def _verify_collection_compatibility(self):
+        """Safely detects and purges stale mock vector data if embedding model upgraded to real transformer weights."""
+        try:
+            if self.collection.count() > 0:
+                sample = self.collection.get(limit=1)
+                if sample and sample.get("metadatas") and sample["metadatas"]:
+                    meta = sample["metadatas"][0]
+                    was_mock = meta.get("is_mock", False) or meta.get("embedding_model") == "mock-embedding-384"
+                    is_now_real = not getattr(self.embedding_model, "is_mock", False)
+                    if was_mock and is_now_real:
+                        logger.warning("Mock embeddings detected in ChromaDB collection. Rebuilding collection for real transformer model.")
+                        self.chroma_client.delete_collection("aegis_knowledge")
+                        self.collection = self.chroma_client.get_or_create_collection(
+                            name="aegis_knowledge",
+                            embedding_function=self.embedding_fn
+                        )
+        except Exception as e:
+            logger.warning(f"Collection compatibility verification notice: {e}")
 
     def _validate_safe_path(self, file_path: str) -> str:
         """Validates that ingestion target lies strictly inside configured directories."""
@@ -259,10 +279,15 @@ class AegisRagService:
                 metadatas.append({
                     "document_id": doc_id,
                     "filename": filename,
+                    "document_name": filename,
                     "source_path": abs_path,
+                    "source": abs_path,
                     "page_number": page_num,
                     "chunk_id": chunk_id,
+                    "chunk_index": chunk_idx,
                     "ingested_at": ingest_time,
+                    "embedding_model": getattr(self.embedding_model, "model_name", "all-MiniLM-L6-v2"),
+                    "is_mock": getattr(self.embedding_model, "is_mock", False),
                     "owner_id": owner_id if owner_id is not None else -1,
                     "owner_username": owner_username if owner_username is not None else ""
                 })

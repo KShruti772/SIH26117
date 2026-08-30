@@ -33,9 +33,16 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // If loading is done but no user, wait for the redirect
+  // If loading is done but no user, render redirecting state
   if (!user) {
-    return null;
+    return (
+      <div className="h-screen w-screen bg-[#070b14] flex flex-col items-center justify-center space-y-3 font-sans">
+        <div className="h-9 w-9 rounded-lg bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
+          <ShieldAlert className="h-5 w-5 animate-pulse" />
+        </div>
+        <span className="text-xs text-slate-400 font-medium">Redirecting to Sign In...</span>
+      </div>
+    );
   }
 
   return <>{children}</>;

@@ -5,6 +5,34 @@ export interface DocumentInfo {
   filename: string;
   status: string;
   uploaded_at: number;
+  chunks?: number;
+  chunk_count?: number;
+  file_size?: number;
+  embedding_model?: string;
+  owner_username?: string;
+}
+
+export interface RagSearchResult {
+  chunk_id: string;
+  text: string;
+  distance: number;
+  metadata: {
+    document_id: string;
+    filename: string;
+    document_name?: string;
+    page_number?: number;
+    chunk_index?: number;
+    embedding_model?: string;
+    is_mock?: boolean;
+    owner_id?: number;
+    owner_username?: string;
+  };
+}
+
+export interface RagQueryResponse {
+  query: string;
+  results: RagSearchResult[];
+  count: number;
 }
 
 export const ragApi = {
@@ -28,6 +56,17 @@ export const ragApi = {
     return apiFetch<DocumentInfo>("/documents/upload", {
       method: "POST",
       body: formData,
+    });
+  },
+
+  /**
+   * POST /documents/query
+   * Executes similarity search query against vector database.
+   */
+  async query(query: string, topK: number = 3): Promise<RagQueryResponse> {
+    return apiFetch<RagQueryResponse>("/documents/query", {
+      method: "POST",
+      body: JSON.stringify({ query, top_k: topK }),
     });
   },
 

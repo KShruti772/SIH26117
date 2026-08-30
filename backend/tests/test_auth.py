@@ -192,7 +192,7 @@ class TestAegisAuth(unittest.TestCase):
         headers = {"Authorization": f"Bearer {expired_token}"}
         res = self.client.get("/auth/me", headers=headers)
         self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
-        self.assertEqual(res.json()["detail"], "Token signature has expired")
+        self.assertEqual(res.json()["detail"], "Token signature has expired or is invalid. Please log in again.")
 
     def test_inactive_user(self):
         """13. Verify inactive profiles are blocked during token requests."""

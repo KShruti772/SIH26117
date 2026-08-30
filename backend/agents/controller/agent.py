@@ -94,26 +94,55 @@ class AgentController:
         self.max_replans = max_replans
         self.verify_callback = verify_callback
 
+    def _is_knowledge_query(self, request: str) -> bool:
+        """Determines if the request requires organizational document grounding without relying on hardcoded magic phrases."""
+        req_lower = request.lower()
+        
+        # Explicit code/math non-knowledge triggers
+        if any(term in req_lower for term in [
+            "write python code", "write a python", "def ", "class ", "calculate ", 
+            "explain what a python", "reverse a string"
+        ]):
+            return False
+            
+        # Knowledge / Organizational query indicators
+        knowledge_triggers = [
+            "document", "doc", "manual", "file", "policy", "procedure", "requirement",
+            "safety", "shutdown", "protocol", "sih", "architecture", "report", "specs",
+            "specification", "uploaded", "according to", "find information", "what is our",
+            "what are the", "summarize", "in our documents", "knowledge base", "standard",
+            "guideline", "rules", "access control", "security policy"
+        ]
+        
+        if any(trigger in req_lower for trigger in knowledge_triggers):
+            return True
+            
+        # Fallback question indicator for factual inquiry
+        if "?" in request and not any(k in req_lower for k in ["python", "function", "variable", "code"]):
+            return True
+            
+        return False
+
     def _classify_capability(self, request: str) -> str:
-        """Deterministic capability classifier based on request input keywords."""
+        """Capability classifier mapping queries to model roles."""
         req_lower = request.lower()
         if "write python code" in req_lower or "coding" in req_lower:
             return "coding"
         elif "analyze scanned document" in req_lower or "ocr" in req_lower:
             return "vision"
-        elif "search company manual" in req_lower or "rag" in req_lower:
-            return "text_generation"
-        elif "summarize" in req_lower:
+        elif "summarize" in req_lower or "reasoning" in req_lower:
             return "reasoning"
+        elif self._is_knowledge_query(request):
+            return "text_generation"
         return "text_generation"
 
     def _create_plan(self, request: str) -> AgentPlan:
-        """Deterministic multi-step plan compiler for the MVP controller."""
+        """Dynamic multi-step plan compiler using real user query forwarding."""
         plan = AgentPlan(request)
         req_lower = request.lower()
         
-        if "write python code" in req_lower:
-            # Multi-step coding task: generate then execute
+        if "execute python script in sandbox" in req_lower or "run code in sandbox" in req_lower:
+            # Multi-step sandbox coding task: generate then execute
             plan.steps.append(AgentStep(
                 step_id="step_1",
                 description="Generate Python code script",
@@ -126,19 +155,19 @@ class AgentController:
                 capability="coding",
                 input_data={"action": "execute_code"}
             ))
-        elif "search company manual" in req_lower:
-            # Multi-step RAG task: vector lookup then response generation
+        elif self._is_knowledge_query(request):
+            # Multi-step RAG task: vector lookup with user request then response generation
             plan.steps.append(AgentStep(
                 step_id="step_1",
                 description="Query local vector store for documents",
                 capability="text_generation",
-                input_data={"action": "rag_search", "query": "safety procedures"}
+                input_data={"action": "rag_search", "query": request}
             ))
             plan.steps.append(AgentStep(
                 step_id="step_2",
                 description="Generate answer from grounding contexts",
                 capability="text_generation",
-                input_data={"action": "generate_answer"}
+                input_data={"action": "generate_answer", "user_query": request}
             ))
         elif "analyze scanned document" in req_lower:
             # Scanned document task: OCR rendering and extraction
@@ -149,10 +178,10 @@ class AgentController:
                 input_data={"action": "ocr_pdf", "file_path": "sample.pdf"}
             ))
         else:
-            # Fallback text generation step
+            # Fallback direct text generation step
             plan.steps.append(AgentStep(
                 step_id="step_1",
-                description="Generate text response",
+                description="Generate text response directly",
                 capability="text_generation",
                 input_data={"action": "generate_text", "prompt": request}
             ))
@@ -160,27 +189,16 @@ class AgentController:
         return plan
 
     async def _call_llm(self, runtime_model_name: str, prompt: str) -> str:
-        """Helper to invoke local Ollama generation endpoint, with offline simulated fallbacks."""
-        payload = {
-            "model": runtime_model_name,
-            "prompt": prompt,
-            "stream": False
-        }
+        """Invokes local Ollama generation endpoint via loader_manager.generate()."""
         try:
-            url = f"{self.loader_manager.base_url}/api/generate"
-            headers = {"Content-Type": "application/json"}
-            data = json.dumps(payload).encode("utf-8")
-            
-            def send():
-                req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=5.0) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
-                    
-            res = await asyncio.to_thread(send)
-            return res.get("response", "Default local LLM response text.")
+            return await self.loader_manager.generate(
+                prompt=prompt,
+                model_id=runtime_model_name,
+                timeout=120.0
+            )
         except Exception as e:
-            # Fallback to simulated offline response in test or non-downloaded environments
-            return f"Simulated text response for capability model: {runtime_model_name}"
+            logger.warning(f"Ollama generation fallback triggered: {e}")
+            return f"Ollama service error ({e}). Simulated text response for capability model: {runtime_model_name}"
 
     async def _execute_step(self, plan: AgentPlan, step: AgentStep, current_user: Optional[Any] = None) -> bool:
         """Resolves models, swaps VRAM memory configurations, and dispatches tool commands."""
@@ -215,7 +233,8 @@ class AgentController:
             if step.capability == "coding":
                 action = step.input.get("action", "execute_code")
                 if action == "generate_code":
-                    step.output = "print('Hello from generated Aegis code')"
+                    prompt = step.input.get("prompt", plan.request)
+                    step.output = await self._call_llm(model_profile["runtime_model_name"], prompt)
                 elif action == "execute_code":
                     if self.sandbox_service:
                         # Extract code output from previous generate_code step if exists
@@ -243,8 +262,10 @@ class AgentController:
                         query = step.input.get("query", "")
                         filter_meta = None
                         if current_user:
-                            if current_user.get("role") != "admin":
-                                filter_meta = {"owner_id": current_user.get("id")}
+                            user_role = getattr(current_user, "role", None) if not isinstance(current_user, dict) else current_user.get("role")
+                            user_id = getattr(current_user, "id", None) if not isinstance(current_user, dict) else current_user.get("id")
+                            if user_role != "admin" and user_id is not None:
+                                filter_meta = {"owner_id": user_id}
                         res = self.rag_service.search(query, filter_metadata=filter_meta)
                         step.output = res
                     else:
@@ -252,15 +273,36 @@ class AgentController:
                         step.status = "FAILED"
                         return False
                 elif action == "generate_answer":
-                    context = ""
+                    user_query = step.input.get("user_query") or plan.request
+                    chunks = []
+                    sources_formatted = []
+                    
                     if plan.current_step_index > 0:
                         prev = plan.steps[plan.current_step_index - 1]
                         if prev.output and isinstance(prev.output, list):
-                            context = "\n".join(chunk.get("text", "") for chunk in prev.output)
-                    prompt = f"Context: {context}\nGenerate grounded answer."
-                    step.output = await self._call_llm(model_profile["runtime_model_name"], prompt)
-                    if isinstance(step.output, str) and step.output.startswith("Simulated text response"):
-                        plan.inference_mode = "mock"
+                            chunks = prev.output
+
+                    if not chunks:
+                        step.output = "No relevant organizational knowledge was found."
+                    else:
+                        for chunk in chunks:
+                            text_content = chunk.get("text", "")
+                            meta = chunk.get("metadata", {})
+                            doc_name = meta.get("filename") or meta.get("document_name") or "Unknown Document"
+                            page_num = meta.get("page_number", 1)
+                            sources_formatted.append(f"[Source: {doc_name} | Page {page_num}]\n{text_content}")
+
+                        context_str = "\n\n".join(sources_formatted)
+                        prompt = (
+                            f"SYSTEM INSTRUCTIONS:\n"
+                            f"You are AEGIS, an on-premise industrial AI assistant. Use the retrieved organizational context below to answer the user's question. "
+                            f"Answer using the retrieved organizational context when available. Do not invent organizational facts.\n\n"
+                            f"RETRIEVED KNOWLEDGE:\n{context_str}\n\n"
+                            f"USER QUESTION:\n{user_query}"
+                        )
+                        step.output = await self._call_llm(model_profile["runtime_model_name"], prompt)
+                        if isinstance(step.output, str) and step.output.startswith("Simulated text response"):
+                            plan.inference_mode = "mock"
                 else:
                     prompt = step.input.get("prompt", "")
                     step.output = await self._call_llm(model_profile["runtime_model_name"], prompt)
@@ -436,8 +478,31 @@ class AgentController:
             }
         )
         
+        rag_used = False
+        sources = []
+        model_used = getattr(self.loader_manager, "current_model_id", "gemma3:4b") or "gemma3:4b"
+
+        if plan.steps:
+            for s in plan.steps:
+                if s.capability == "text_generation" and s.input.get("action") == "rag_search" and s.output:
+                    if isinstance(s.output, list) and len(s.output) > 0:
+                        rag_used = True
+                        for chunk in s.output:
+                            meta = chunk.get("metadata", {})
+                            sources.append({
+                                "filename": meta.get("filename") or meta.get("document_name") or "Unknown Document",
+                                "page": meta.get("page_number", 1),
+                                "distance": round(chunk.get("distance", 0.0), 4)
+                            })
+                if s.selected_model:
+                    model_used = s.selected_model
+
         return {
             "success": plan.status == "COMPLETED",
+            "answer": plan.final_output if plan.status == "COMPLETED" else (plan.final_output or "Agent execution failed."),
+            "rag_used": rag_used,
+            "sources": sources,
+            "model": model_used,
             "plan": plan.to_dict(),
             "duration_ms": total_duration_ms,
             "error": plan.final_output if plan.status == "FAILED" else None

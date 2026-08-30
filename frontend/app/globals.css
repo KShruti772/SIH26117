@@ -1,12 +1,31 @@
 @import "tailwindcss";
 
+@theme {
+  --font-sans: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Roboto Mono, monospace;
+
+  --color-slate-250: #cbd5e1;
+  --color-slate-350: #cbd5e1;
+  --color-slate-450: #94a3b8;
+  --color-slate-550: #64748b;
+  --color-slate-650: #475569;
+  --color-slate-655: #334155;
+  --color-emerald-450: #34d399;
+  --color-rose-455: #fb7185;
+}
+
 :root {
-  --background: #0a0f1d;
+  --background: #070b14;
   --foreground: #f8fafc;
-  --card-bg: rgba(17, 24, 39, 0.75);
-  --card-border: rgba(255, 255, 255, 0.06);
-  --accent: #3b82f6;
-  --accent-glow: rgba(59, 130, 246, 0.15);
+  --panel-bg: #090e1a;
+  --card-bg: rgba(13, 19, 34, 0.9);
+  --element-bg: #080d1a;
+  --card-border: rgba(30, 41, 59, 0.8);
+  --accent-primary: #3b82f6;
+  --accent-secondary: #06b6d4;
+  --status-success: #10b981;
+  --status-warning: #f59e0b;
+  --status-danger: #ef4444;
   --sidebar-width: 260px;
 }
 
@@ -21,26 +40,52 @@ body {
   height: 100%;
   background-color: var(--background);
   color: var(--foreground);
-  font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Custom scrollbars for a premium developer console feel */
+/* Custom scrollbars for enterprise dark UI */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(7, 11, 20, 0.8);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 3px;
+  background: rgba(51, 65, 85, 0.6);
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(59, 130, 246, 0.4);
+}
+
+/* Custom Glassmorphism and Surface Hierarchy Utility Classes */
+.aegis-panel {
+  background-color: var(--panel-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 0.85rem;
+}
+
+.aegis-card {
+  background-color: var(--card-bg);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--card-border);
+  border-radius: 0.85rem;
+  transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.aegis-card:hover {
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.aegis-element {
+  background-color: var(--element-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 0.75rem;
+  transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }

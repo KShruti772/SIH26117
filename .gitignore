@@ -24,3 +24,23 @@ outputs/
 # Logs
 *.log
 data/knowledge_base/
+# Local ML models
+models/all-MiniLM-L6-v2/
+
+# Local/test vector databases
+data/test_vdb_flow/
+
+# Test/diagnostic artifacts
+data/test_diag.txt
+scratch/
+
+# Local authentication database
+data/private/*.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+.next/

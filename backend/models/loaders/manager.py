@@ -31,6 +31,10 @@ class ConcurrencyTimeoutError(ModelLoaderError):
     """Raised when a lock acquisition times out under high concurrency."""
     pass
 
+class ModelNotFoundError(ModelLoaderError):
+    """Raised when the requested model is not pulled in the local Ollama runtime."""
+    pass
+
 class ModelLoaderManager:
     """Manages the memory lifecycle of local LLMs using dynamic loading/unloading mutex loops."""
     
@@ -54,9 +58,86 @@ class ModelLoaderManager:
             return None
         except Exception:
             return None
+
+    async def get_discovered_models(self) -> List[Dict[str, Any]]:
+        """
+        Discovers locally installed models from Ollama runtime via GET /api/tags,
+        merges with configured registry metadata, and determines active/installed status.
+        """
+        active_id = await self.get_current_model_id() or self.current_model_id or "gemma3:4b"
+        installed_ollama_models = []
+        try:
+            res = await asyncio.to_thread(self._send_request, "/api/tags", "GET", timeout=5.0)
+            installed_ollama_models = res.get("models", [])
+        except Exception as e:
+            logger.warning(f"Failed to discover local Ollama tags: {e}")
+
+        installed_tags = {m.get("name"): m for m in installed_ollama_models if m.get("name")}
         
-    def _send_request(self, path: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 5.0) -> Dict[str, Any]:
-        """Performs blocking synchronous HTTP requests to local Ollama runtime."""
+        configured_models = self.registry_manager.get_all_models(include_disabled=True)
+        results = []
+        seen_tags = set()
+
+        for cfg in configured_models:
+            tag = cfg.get("runtime_model_name", cfg.get("model_id"))
+            seen_tags.add(tag)
+            seen_tags.add(cfg.get("model_id"))
+            
+            is_installed = tag in installed_tags or any(tag == t or t.startswith(tag + ":") for t in installed_tags)
+            is_active = (cfg.get("model_id") == active_id or tag == active_id)
+            
+            ollama_meta = installed_tags.get(tag, {})
+            details = ollama_meta.get("details", {})
+            
+            status = "ACTIVE" if is_active else ("INSTALLED" if is_installed else "UNAVAILABLE")
+            
+            results.append({
+                "model_id": cfg.get("model_id"),
+                "display_name": cfg.get("display_name", cfg.get("model_id")),
+                "runtime_model_name": tag,
+                "provider": cfg.get("provider", details.get("family", "Ollama").capitalize()),
+                "runtime": "LOCAL",
+                "status": status,
+                "is_installed": is_installed,
+                "is_active": is_active,
+                "size_bytes": ollama_meta.get("size"),
+                "modified_at": ollama_meta.get("modified_at"),
+                "parameter_size": details.get("parameter_size", cfg.get("quantization", "4B")),
+                "quantization": details.get("quantization_level", cfg.get("quantization", "Q4_K_M")),
+                "format": details.get("format", "gguf"),
+                "family": details.get("family", "gemma3"),
+                "capabilities": cfg.get("capabilities", ["text_generation", "reasoning", "coding"]),
+                "notes": cfg.get("notes", "Local open-weight model.")
+            })
+
+        for tag, meta in installed_tags.items():
+            if tag not in seen_tags and not any(tag.startswith(st + ":") for st in seen_tags):
+                is_active = (tag == active_id)
+                details = meta.get("details", {})
+                results.append({
+                    "model_id": tag,
+                    "display_name": tag.capitalize(),
+                    "runtime_model_name": tag,
+                    "provider": details.get("family", "Ollama").capitalize(),
+                    "runtime": "LOCAL",
+                    "status": "ACTIVE" if is_active else "INSTALLED",
+                    "is_installed": True,
+                    "is_active": is_active,
+                    "size_bytes": meta.get("size"),
+                    "modified_at": meta.get("modified_at"),
+                    "parameter_size": details.get("parameter_size", "4B"),
+                    "quantization": details.get("quantization_level", "Q4_K_M"),
+                    "format": details.get("format", "gguf"),
+                    "family": details.get("family", "Ollama"),
+                    "capabilities": ["text_generation", "reasoning", "coding"],
+                    "notes": "Discovered from local Ollama runtime tags."
+                })
+
+        return results
+        
+    def _send_request(self, path: str, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 60.0) -> Dict[str, Any]:
+        """Performs blocking synchronous HTTP requests to local Ollama runtime with exponential backoff retries."""
+        import time
         url = f"{self.base_url}{path}"
         data = None
         headers = {}
@@ -65,38 +146,102 @@ class ModelLoaderManager:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
             
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                status = response.status
-                body = response.read().decode("utf-8")
-                
-                # Check for standard status
-                if status not in (200, 201, 204):
-                    raise ModelLoaderError(f"HTTP call returned error status: {status}")
-                
-                if body.strip():
-                    try:
-                        return json.loads(body)
-                    except json.JSONDecodeError:
-                        # Return string wrapper if body is plain text
-                        return {"text": body}
-                return {}
-        except urllib.error.URLError as e:
-            raise RuntimeUnavailableError(f"Ollama local service is unreachable: {e.reason}")
-        except Exception as e:
-            raise ModelLoaderError(f"Unexpected error communicating with local runtime: {e}")
+        max_retries = 3
+        backoff_delay = 0.2
+        last_exception = None
+
+        for attempt in range(max_retries):
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    status = response.status
+                    body = response.read().decode("utf-8")
+                    
+                    if status not in (200, 201, 204):
+                        raise ModelLoaderError(f"HTTP call returned error status: {status}")
+                    
+                    if body.strip():
+                        try:
+                            return json.loads(body)
+                        except json.JSONDecodeError:
+                            return {"text": body}
+                    return {}
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    raise ModelNotFoundError(f"Requested model was not found in local Ollama storage: HTTP 404")
+                last_exception = ModelLoaderError(f"Ollama call returned HTTP status {e.code}")
+            except urllib.error.URLError as e:
+                last_exception = RuntimeUnavailableError(f"Ollama local service is unreachable: {e.reason}")
+            except Exception as e:
+                last_exception = ModelLoaderError(f"Ollama call encountered error: {e}")
+
+            # Sleep before retrying
+            if attempt < max_retries - 1:
+                time.sleep(backoff_delay)
+                backoff_delay *= 2.0
+
+        if isinstance(last_exception, (RuntimeUnavailableError, ModelNotFoundError, ModelLoaderError)):
+            raise last_exception
+        raise RuntimeUnavailableError(f"Ollama local service is unreachable after {max_retries} attempts: {last_exception}")
 
     async def is_runtime_available(self) -> bool:
         """Asynchronously checks if the local Ollama daemon is running."""
         try:
             # We call the root URL which returns a simple text string "Ollama is running"
-            result = await asyncio.to_thread(self._send_request, "/", "GET", timeout=2.0)
+            result = await asyncio.to_thread(self._send_request, "/", "GET", timeout=5.0)
             return "Ollama" in result.get("text", "") or "running" in result.get("text", "")
         except RuntimeUnavailableError:
             return False
         except Exception:
             return False
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model_id: Optional[str] = None,
+        timeout: float = 60.0
+    ) -> str:
+        """
+        Asynchronously verifies local Ollama availability, resolves model names,
+        and generates response text via local Ollama HTTP endpoints.
+        """
+        if not prompt or not prompt.strip():
+            raise ModelLoaderError("Prompt text cannot be empty.")
+
+        # 1. Verify Ollama daemon reachability
+        if not await self.is_runtime_available():
+            raise RuntimeUnavailableError(
+                f"Local inference runtime (Ollama) is offline or unreachable at '{self.base_url}'."
+            )
+
+        # 2. Resolve target runtime model name
+        target_model = model_id or self.current_model_id or "gemma3:4b"
+        runtime_model = target_model
+        try:
+            profile = self.registry_manager.get_model(target_model)
+            runtime_model = profile.get("runtime_model_name", target_model)
+        except Exception:
+            runtime_model = target_model
+
+        # 3. Build API payload
+        payload: Dict[str, Any] = {
+            "model": runtime_model,
+            "prompt": prompt,
+            "stream": False
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+
+        # 4. Dispatch async request to local daemon
+        try:
+            result = await asyncio.to_thread(self._send_request, "/api/generate", "POST", payload, timeout=timeout)
+            response_text = result.get("response", "")
+            return response_text
+        except RuntimeUnavailableError:
+            raise
+        except Exception as e:
+            raise ModelLoaderError(f"Ollama local generation failed: {e}")
 
     async def get_running_models(self) -> List[str]:
         """Asynchronously retrieves the tags of currently loaded models in VRAM."""

@@ -89,3 +89,20 @@ test("Response Parser - Handles failure outputs gracefully", () => {
   assert.strictEqual(parsed.success, false);
   assert.strictEqual(parsed.answer, "Agent execution failed.");
 });
+
+test("Conversation Session Parser - Maps session ID and messages array", () => {
+  const session = {
+    id: "conv_12345",
+    title: "Safety Manual Query",
+    created_at: "2026-08-29T10:00:00Z",
+    updated_at: "2026-08-29T10:05:00Z",
+    messages: [
+      { id: "m1", role: "user", content: "Safety PPE?" },
+      { id: "m2", role: "assistant", content: "Wear helmets and gloves.", rag_used: true }
+    ]
+  };
+
+  assert.strictEqual(session.id, "conv_12345");
+  assert.strictEqual(session.messages.length, 2);
+  assert.strictEqual(session.messages[1].rag_used, true);
+});

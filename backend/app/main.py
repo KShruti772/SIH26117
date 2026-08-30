@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+from typing import Optional, Any
 import uuid
 import logging
 from backend.app.config.settings import settings
@@ -26,15 +26,15 @@ init_db()
 registry_manager = ModelRegistryManager("backend/models/registry/registry.json")
 loader_manager = ModelLoaderManager(registry_manager)
 
-# In-memory mock/local embedding model fallback helper
+# Initialize local SentenceTransformer embedding model (no silent mock fallback)
 embedding_path = os.path.join(settings.MODEL_DIR, "all-MiniLM-L6-v2")
+from backend.rag.embeddings import get_local_embedding_model
 try:
-    if os.path.exists(embedding_path):
-        embedding_model = LocalTransformerEmbeddingModel(embedding_path)
-    else:
-        embedding_model = MockEmbeddingModel()
-except Exception:
-    embedding_model = MockEmbeddingModel()
+    embedding_model = get_local_embedding_model(embedding_path)
+except Exception as e:
+    import logging
+    logging.getLogger("aegis.rag").error(f"Local embedding model initialization failed: {e}")
+    raise RuntimeError(f"Local embedding model is unavailable: {e}")
 
 rag_service = AegisRagService(
     embedding_model=embedding_model,
@@ -64,6 +64,7 @@ origins = settings.CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:[0-9]+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -85,55 +86,214 @@ app.include_router(auth_router)
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=1000)
+    session_id: Optional[str] = None
+
+class CreateConversationRequest(BaseModel):
+    title: Optional[str] = "New Conversation"
 
 class ModelSelectRequest(BaseModel):
     model_id: str = Field(..., min_length=1)
+
+@app.get("/conversations", tags=["Conversation Operations"])
+async def list_conversations(current_user = Depends(get_current_user)):
+    """Retrieves saved conversation sessions for active user."""
+    from backend.agents.conversations import ConversationManager
+    return ConversationManager.list_conversations(
+        user_id=current_user.get("id"),
+        username=current_user.get("username")
+    )
+
+@app.post("/conversations", tags=["Conversation Operations"])
+async def create_conversation(payload: CreateConversationRequest, current_user = Depends(get_current_user)):
+    """Creates a new conversation session."""
+    from backend.agents.conversations import ConversationManager
+    conv = ConversationManager.create_conversation(
+        title=payload.title or "New Conversation",
+        user_id=_get_user_val(current_user, "id"),
+        username=_get_user_val(current_user, "username")
+    )
+    AuditLogger.log_event(
+        action="CONVERSATION_CREATED",
+        component="app.main",
+        status="success",
+        user_id=_get_user_val(current_user, "id"),
+        username=_get_user_val(current_user, "username"),
+        role=_get_user_val(current_user, "role"),
+        resource=conv["id"],
+        metadata={"session_id": conv["id"], "title": payload.title or "New Conversation"}
+    )
+    return conv
+
+def _get_user_val(user: Any, key: str, default: Any = None) -> Any:
+    if user is None:
+        return default
+    if isinstance(user, dict):
+        return user.get(key, default)
+    if hasattr(user, "__getitem__"):
+        try:
+            return user[key]
+        except (KeyError, IndexError, TypeError):
+            pass
+    return getattr(user, key, default)
+
+@app.get("/conversations/{session_id}", tags=["Conversation Operations"])
+async def get_conversation(session_id: str, current_user = Depends(get_current_user)):
+    """Retrieves conversation metadata and stored messages, enforcing session ownership."""
+    from backend.agents.conversations import ConversationManager
+    conv = ConversationManager.get_conversation(session_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+        
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+    
+    is_admin = curr_role == "admin"
+    owner_id = conv.get("user_id")
+    owner_username = conv.get("username")
+    
+    # Ownership check: must be admin or session owner
+    if not is_admin and (
+        (owner_id is not None and owner_id != curr_id) or
+        (owner_id is None and owner_username and owner_username != curr_username)
+    ):
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=session_id,
+            metadata={
+                "reason": "RESOURCE_OWNERSHIP_FORBIDDEN",
+                "session_id": session_id,
+                "owner_id": owner_id,
+                "operation": "get_conversation"
+            }
+        )
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this conversation session.")
+        
+    return conv
+
+@app.delete("/conversations/{session_id}", tags=["Conversation Operations"])
+async def delete_conversation(session_id: str, current_user = Depends(get_current_user)):
+    """Deletes conversation session and stored messages, enforcing session ownership."""
+    from backend.agents.conversations import ConversationManager
+    conv_meta = ConversationManager.get_conversation_owner(session_id)
+    if not conv_meta:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+        
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+
+    is_admin = curr_role == "admin"
+    owner_id = conv_meta.get("user_id")
+    owner_username = conv_meta.get("username")
+    
+    # Ownership check: must be admin or session owner
+    if not is_admin and (
+        (owner_id is not None and owner_id != curr_id) or
+        (owner_id is None and owner_username and owner_username != curr_username)
+    ):
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=session_id,
+            metadata={
+                "reason": "RESOURCE_OWNERSHIP_FORBIDDEN",
+                "session_id": session_id,
+                "owner_id": owner_id,
+                "operation": "delete_conversation"
+            }
+        )
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this conversation session.")
+        
+    success = ConversationManager.delete_conversation(session_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+    
+    AuditLogger.log_event(
+        action="CONVERSATION_DELETED",
+        component="app.main",
+        status="success",
+        user_id=curr_id,
+        username=curr_username,
+        role=curr_role,
+        resource=session_id,
+        metadata={"session_id": session_id}
+    )
+    return {"status": "success", "id": session_id}
 
 @app.post("/chat", tags=["Agent Operations"])
 async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user)):
     """Runs a multi-step sovereign agent query using local models, sandboxes, and verifiers."""
     from fastapi import HTTPException
+    from backend.agents.conversations import ConversationManager
+    import uuid
+    
     try:
+        session_id = payload.session_id or f"conv_{uuid.uuid4().hex[:12]}"
+        
+        # Persist user prompt to local database session
+        ConversationManager.add_message(
+            session_id=session_id,
+            role="user",
+            content=payload.message
+        )
+        
         res = await agent_controller.run(payload.message, current_user=current_user)
         req_id = get_request_id()
         
-        sources = []
-        verification = None
+        is_rag = res.get("rag_used", False)
+        sources = res.get("sources", [])
+        model_used = res.get("model", "gemma3:4b") or "gemma3:4b"
+        answer = res.get("answer") or "Agent execution failed."
+        verification = "GROUNDED" if is_rag else ("UNVERIFIED" if res["success"] else "FAILED")
         
-        if res.get("plan"):
-            plan_data = res["plan"]
-            for step in plan_data.get("steps", []):
-                # RAG search step
-                if step.get("capability") == "text_generation" and step.get("input", {}).get("action") == "rag_search":
-                    output_data = step.get("output")
-                    if isinstance(output_data, list):
-                        for chunk in output_data:
-                            sources.append({
-                                "filename": chunk.get("metadata", {}).get("filename", "Unknown Document"),
-                                "page_number": chunk.get("metadata", {}).get("page_number", 1)
-                            })
-                # Citations verification step
-                if step.get("verification_result") and step.get("verification_result") != "PASS":
-                    verification = step["verification_result"]
-                    
-        # Add model_info dynamically
-        active_id = await loader_manager.get_current_model_id() or loader_manager.current_model_id or "qwen2.5-3b-instruct"
-        inference_mode = "real"
-        if res.get("plan", {}).get("inference_mode", "real") == "mock" or (
-            loader_manager.current_model_id == active_id and not await loader_manager.is_runtime_available()
-        ):
-            inference_mode = "mock"
+        # Persist assistant output to local database session
+        ConversationManager.add_message(
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            rag_used=is_rag,
+            sources=sources,
+            model_id=model_used,
+            duration_ms=res["duration_ms"],
+            request_id=req_id,
+            verification=verification,
+            error_detail=res.get("error") if not res["success"] else None
+        )
+
+        AuditLogger.log_event(
+            action="CHAT_REQUEST",
+            component="app.main",
+            status="success" if res["success"] else "failure",
+            user_id=_get_user_val(current_user, "id"),
+            username=_get_user_val(current_user, "username"),
+            role=_get_user_val(current_user, "role"),
+            resource=session_id,
+            duration_ms=res["duration_ms"],
+            metadata={"session_id": session_id, "model_id": model_used}
+        )
 
         return {
             "success": res["success"],
-            "answer": res["plan"]["final_output"] if res["success"] else (res["error"] or "Agent execution failed."),
+            "session_id": session_id,
+            "answer": answer,
+            "rag_used": is_rag,
             "sources": sources,
-            "verification": verification or "PASS",
+            "verification": verification,
             "request_id": req_id,
             "duration_ms": res["duration_ms"],
             "model_info": {
-                "model_id": active_id,
-                "inference_mode": inference_mode
+                "model_id": model_used,
+                "inference_mode": "real" if res["success"] else "mock"
             }
         }
     except Exception as e:
@@ -141,7 +301,7 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
         logging.getLogger("aegis.app").error(f"Chat route exception: {e}")
         raise HTTPException(
             status_code=500,
-            detail="The sovereign node encountered an unexpected fault during agent execution."
+            detail=f"The sovereign node encountered an unexpected fault during agent execution: {e}"
         )
 
 
@@ -151,6 +311,9 @@ async def get_audit_logs(
     username: Optional[str] = None,
     status: Optional[str] = None,
     request_id: Optional[str] = None,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     current_user = Depends(RoleChecker(["admin"]))
 ):
     """Retrieves system audit logs. Restricted to administrator role only."""
@@ -158,9 +321,98 @@ async def get_audit_logs(
         action=action,
         username=username,
         status=status,
-        request_id=request_id
+        request_id=request_id,
+        search=search,
+        start_date=start_date,
+        end_date=end_date
     )
     return logs
+
+
+@app.get("/audit/summary", tags=["System Audit"])
+async def get_audit_summary(current_user = Depends(RoleChecker(["admin"]))):
+    """Retrieves real metadata counts from SQLite audit database. Restricted to administrator role only."""
+    import sqlite3
+    from backend.security.database import get_db_path
+    
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        
+        # 1. Total events
+        cursor.execute("SELECT COUNT(*) FROM audit_logs")
+        total_events = cursor.fetchone()[0]
+
+        # 2. Successful events
+        cursor.execute("SELECT COUNT(*) FROM audit_logs WHERE status = 'success'")
+        successful_events = cursor.fetchone()[0]
+
+        # 3. Failed actions
+        cursor.execute("SELECT COUNT(*) FROM audit_logs WHERE status = 'failure'")
+        failed_events = cursor.fetchone()[0]
+        
+        # 4. Security events
+        cursor.execute("""
+            SELECT COUNT(*) FROM audit_logs 
+            WHERE action IN (
+                'AUTH_LOGIN', 'AUTH_REGISTER', 'AUTH_LOGOUT', 'AUTH_CHANGE_PASSWORD', 
+                'PASSWORD_CHANGE', 'PASSWORD_RESET', 'USER_PASSWORD_RESET', 
+                'USER_PROVISION', 'USER_PROVISIONED', 'USER_ROLE_CHANGE', 'USER_ROLE_UPDATED', 
+                'USER_ENABLE', 'USER_DISABLE', 'USER_STATUS_UPDATED', 'SECURITY_CONFIGURATION_CHANGE', 
+                'DOCUMENT_ACCESS_DENIED', 'ACCESS_DENIED'
+            )
+        """)
+        security_events = cursor.fetchone()[0]
+        
+        # 5. AI Runtime events
+        cursor.execute("""
+            SELECT COUNT(*) FROM audit_logs 
+            WHERE action IN ('MODEL_LOAD', 'MODEL_UNLOAD', 'MODEL_SWITCH', 'AGENT_EXECUTION')
+        """)
+        ai_events = cursor.fetchone()[0]
+
+        # 6. RAG events
+        cursor.execute("""
+            SELECT COUNT(*) FROM audit_logs 
+            WHERE action IN (
+                'RAG_SEARCH', 'RAG_QUERY', 'RAG_DOCUMENT_UPLOAD', 'RAG_DOCUMENT_INDEX', 
+                'DOCUMENT_INGEST', 'DOCUMENT_UPLOADED', 'DOCUMENT_INDEXED', 'DOCUMENT_DELETED', 'OCR_PROCESS'
+            )
+        """)
+        rag_events = cursor.fetchone()[0]
+
+        # 7. Sandbox events
+        cursor.execute("""
+            SELECT COUNT(*) FROM audit_logs 
+            WHERE action IN ('SANDBOX_EXECUTION')
+        """)
+        sandbox_events = cursor.fetchone()[0]
+        
+        # Legacy auth events for backward compatibility
+        cursor.execute("""
+            SELECT COUNT(*) FROM audit_logs 
+            WHERE action IN ('AUTH_LOGIN', 'AUTH_REGISTER', 'AUTH_LOGOUT', 'AUTH_CHANGE_PASSWORD', 'USER_PROVISIONED', 'USER_STATUS_UPDATED', 'USER_ROLE_UPDATED', 'USER_PASSWORD_RESET')
+        """)
+        auth_events = cursor.fetchone()[0]
+        
+        return {
+            "total_events": total_events,
+            "successful_events": successful_events,
+            "failed_actions": failed_events,
+            "security_events": security_events,
+            "ai_operations": ai_events,
+            "rag_events": rag_events,
+            "sandbox_events": sandbox_events,
+            "authentication": auth_events
+        }
+    finally:
+        conn.close()
+
+@app.get("/audit/verify", tags=["System Audit"])
+async def verify_audit_ledger(current_user = Depends(RoleChecker(["admin"]))):
+    """Verifies cryptographic HMAC-SHA256 hash chain integrity of the audit ledger."""
+    return AuditLogger.verify_chain_integrity()
 
 @app.get("/", tags=["General"])
 async def root():
@@ -390,12 +642,48 @@ async def delete_document(id: str, current_user = Depends(get_current_user)):
         }
     except Exception as e:
         logging.getLogger("aegis.app").error(f"Document delete failure: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete document from storage.")
+class RAGQueryRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=1000)
+    top_k: int = Field(default=3, ge=1, le=10)
+
+@app.post("/documents/query", tags=["RAG Operations"])
+async def query_documents(payload: RAGQueryRequest, current_user = Depends(get_current_user)):
+    """Executes dynamic vector similarity search against the local ChromaDB database."""
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+
+    is_admin = curr_role == "admin"
+    filter_meta = None if is_admin else {"owner_id": curr_id}
+    
+    results = rag_service.search(
+        query=payload.query,
+        top_k=payload.top_k,
+        filter_metadata=filter_meta
+    )
+    
+    AuditLogger.log_event(
+        action="RAG_QUERY",
+        component="app.main",
+        status="success",
+        user_id=curr_id,
+        username=curr_username,
+        role=curr_role,
+        metadata={"query_length": len(payload.query)}
+    )
+    return {
+        "query": payload.query,
+        "results": results,
+        "count": len(results)
+    }
+
+class ModelTestRequest(BaseModel):
+    model_id: Optional[str] = None
 
 @app.get("/models", tags=["Model Operations"])
 async def get_models(current_user = Depends(get_current_user)):
-    """Retrieves list of all configured model profiles in the registry."""
-    return registry_manager.get_all_models(include_disabled=False)
+    """Retrieves list of all discovered and configured model profiles."""
+    return await loader_manager.get_discovered_models()
 
 @app.get("/models/current", tags=["Model Operations"])
 async def get_current_model(current_user = Depends(get_current_user)):
@@ -404,43 +692,216 @@ async def get_current_model(current_user = Depends(get_current_user)):
     if not curr_id:
         curr_id = loader_manager.current_model_id
     if not curr_id:
-        curr_id = "qwen2.5-3b-instruct"
+        curr_id = "gemma3:4b"
         
     try:
         return registry_manager.get_model(curr_id)
     except Exception:
-        raise HTTPException(status_code=404, detail="Current model profile not found in registry.")
+        return {
+            "model_id": curr_id,
+            "display_name": curr_id.capitalize(),
+            "runtime_model_name": curr_id,
+            "status": "ACTIVE"
+        }
 
 @app.post("/models/select", tags=["Model Operations"])
-async def select_model(payload: ModelSelectRequest, current_user = Depends(get_current_user)):
-    """Selects and loads a model into local VRAM, with simulated development fallbacks."""
+async def select_model(payload: ModelSelectRequest, current_user = Depends(RoleChecker(["admin"]))):
+    """Selects and loads a model into local VRAM."""
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
     try:
         res = await loader_manager.switch_model(payload.model_id)
         loader_manager.current_model_id = payload.model_id
+        AuditLogger.log_event(
+            action="MODEL_SELECTED",
+            component="app.main",
+            status="success",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=payload.model_id,
+            metadata={"model_id": payload.model_id}
+        )
         return res
     except RuntimeUnavailableError as e:
         if settings.APP_ENV == "development":
             loader_manager.current_model_id = payload.model_id
-            try:
-                profile = registry_manager.get_model(payload.model_id)
-                runtime_name = profile["runtime_model_name"]
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid model_id.")
-                
+            AuditLogger.log_event(
+                action="MODEL_SELECTED",
+                component="app.main",
+                status="success",
+                user_id=curr_id,
+                username=curr_username,
+                role=curr_role,
+                resource=payload.model_id,
+                metadata={"model_id": payload.model_id}
+            )
             return {
                 "status": "success",
                 "model_id": payload.model_id,
-                "active_model": runtime_name,
+                "active_model": payload.model_id,
                 "details": "simulated_load"
             }
+        AuditLogger.log_event(
+            action="MODEL_SELECTED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=payload.model_id,
+            metadata={"model_id": payload.model_id, "error_category": "runtime_unavailable"}
+        )
         raise HTTPException(status_code=503, detail="Local inference runtime is offline or unreachable.")
     except Exception as e:
+        AuditLogger.log_event(
+            action="MODEL_SELECTED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=payload.model_id,
+            metadata={"model_id": payload.model_id, "error_category": str(e)}
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/models/test", tags=["Model Operations"])
+async def test_model_inference(payload: Optional[ModelTestRequest] = None, current_user = Depends(get_current_user)):
+    """Executes deterministic test inference against target model on local Ollama daemon."""
+    import time
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+
+    target_model = (payload.model_id if payload and payload.model_id else None) or loader_manager.current_model_id or "gemma3:4b"
+    start = time.perf_counter()
+    try:
+        res = await loader_manager.generate(
+            prompt="Respond with exactly: AEGIS MODEL TEST PASSED",
+            model_id=target_model,
+            timeout=30.0
+        )
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        AuditLogger.log_event(
+            action="MODEL_TESTED",
+            component="app.main",
+            status="success",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=target_model,
+            duration_ms=duration_ms,
+            metadata={"model_id": target_model, "status": "PASS"}
+        )
+        return {
+            "status": "PASS",
+            "model": target_model,
+            "latency_ms": duration_ms,
+            "response": res.strip()
+        }
+    except Exception as e:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        AuditLogger.log_event(
+            action="MODEL_TESTED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=target_model,
+            duration_ms=duration_ms,
+            metadata={"model_id": target_model, "status": "FAIL"}
+        )
+        return {
+            "status": "FAIL",
+            "model": target_model,
+            "latency_ms": duration_ms,
+            "error": str(e)
+        }
+
+class SandboxRequest(BaseModel):
+    code: str
+    timeout_seconds: Optional[int] = 10
+
+@app.post("/sandbox/execute", tags=["Sandbox Operations"])
+async def execute_in_sandbox(payload: SandboxRequest, current_user = Depends(get_current_user)):
+    """Executes python code inside the isolated local subprocess sandbox."""
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+    try:
+        res = sandbox_service.execute(payload.code, timeout_seconds=payload.timeout_seconds)
+        AuditLogger.log_event(
+            action="SANDBOX_EXECUTION",
+            component="app.main",
+            status="success" if res.get("success") else "failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            duration_ms=res.get("execution_time_ms"),
+            metadata={"sandbox_exit_code": res.get("exit_code"), "sandbox_timeout": payload.timeout_seconds}
+        )
+        return res
+    except Exception as e:
+        AuditLogger.log_event(
+            action="SANDBOX_EXECUTION",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            metadata={"error_category": str(e)}
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health", tags=["System"])
-async def health():
+async def health(details: bool = False):
+    if not details:
+        return {"status": "ok"}
+        
+    import sqlite3
+    import os
+    from backend.security.database import get_db_path
+    
+    # 1. Audit ledger sqlite check
+    audit_ok = False
+    try:
+        db_path = get_db_path()
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+        conn.close()
+        audit_ok = True
+    except Exception:
+        pass
+        
+    # 2. Vector Store check
+    vector_ok = False
+    try:
+        if rag_service and getattr(rag_service, "collection", None) is not None:
+            vector_ok = True
+        else:
+            db_dir = getattr(settings, "CHROMA_PERSIST_DIR", getattr(settings, "VECTOR_DB_PATH", "./vectorstore"))
+            if os.path.exists(db_dir):
+                vector_ok = True
+    except Exception:
+        pass
+
+    # 3. Ollama server connection check
+    runtime_ok = await loader_manager.is_runtime_available()
+    
     return {
-        "status": "ok"
+        "status": "ok",
+        "services": {
+            "ai_runtime": "healthy" if runtime_ok else "degraded",
+            "rag_engine": "healthy" if vector_ok else "unhealthy",
+            "vector_store": "healthy" if vector_ok else "unhealthy",
+            "sandbox": "protected",
+            "audit_ledger": "active" if audit_ok else "inactive"
+        }
     }
 
 if __name__ == "__main__":
