@@ -43,7 +43,8 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   const { params, headers: customHeaders, body, ...init } = options;
 
   // 1. Build URL with query params if provided
-  let url = `${env.apiUrl}${path}`;
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  let url = `${env.apiUrl}${cleanPath}`;
   if (params) {
     const searchParams = new URLSearchParams(params);
     url += `?${searchParams.toString()}`;
@@ -63,6 +64,13 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     headers.set("Content-Type", "application/json");
   }
 
+  // Development console diagnostics
+  const method = (init.method || "GET").toUpperCase();
+  if (process.env.NODE_ENV !== "production") {
+    const maskedAuth = token ? `Bearer ${token.substring(0, 8)}...[TRUNCATED]` : "None";
+    console.log(`[AEGIS API REQUEST] ${method} ${url} (Auth: ${maskedAuth})`);
+  }
+
   // 3. Set request timeout via AbortController
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -78,6 +86,9 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 
     // 3. Handle success responses
     if (response.ok) {
+      if (process.env.NODE_ENV !== "production") {
+        console.log(`[AEGIS API SUCCESS] ${method} ${url} -> HTTP ${response.status}`);
+      }
       if (response.status === 204) {
         return null as unknown as T;
       }
@@ -98,6 +109,10 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
       }
     } catch {
       // Response was not JSON
+    }
+
+    if (process.env.NODE_ENV !== "production") {
+      console.warn(`[AEGIS API ERROR] ${method} ${url} -> HTTP ${response.status} (${response.statusText}) | Detail: ${errMessage}`);
     }
 
     // 5. Clean translation of standard HTTP status codes
@@ -130,7 +145,15 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     if (error instanceof ApiError) {
       throw error;
     }
-    // Convert network timeout/connection failures into safe text
-    throw new ApiError("Unable to connect to the AEGIS backend. Please verify that the local service is running.", 503);
+    const failureReason = error instanceof Error ? error.message : String(error);
+    if (process.env.NODE_ENV !== "production") {
+      console.error(`[AEGIS API NETWORK FAILURE] ${method} ${url} failed to reach server. Reason: ${failureReason}`);
+    }
+    // Convert network timeout/connection failures into safe text with underlying details
+    throw new ApiError(
+      `Unable to connect to the AEGIS backend at ${env.apiUrl}. Details: ${failureReason}`,
+      503,
+      { networkReason: failureReason, targetUrl: url }
+    );
   }
 }
