@@ -103,12 +103,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const logout = () => {
-    authApi.logout();
-    setUser(null);
-    setError(null);
-    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-      window.location.href = "/login";
+  const logout = async () => {
+    try {
+      await authApi.logout();
+    } finally {
+      setUser(null);
+      setError(null);
+      if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+        window.location.href = "/login";
+      }
     }
   };
 
