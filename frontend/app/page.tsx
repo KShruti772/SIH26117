@@ -16,6 +16,12 @@ import { useAuth } from "../components/providers/AuthProvider";
 import Card from "../components/ui/Card";
 import StatusBadge from "../components/ui/StatusBadge";
 import Button from "../components/ui/Button";
+import DashboardView from "../components/views/DashboardView";
+import AboutView from "../components/views/AboutView";
+import SettingsView from "../components/views/SettingsView";
+import DocumentsView from "../components/views/DocumentsView";
+import KnowledgeBaseView from "../components/views/KnowledgeBaseView";
+import ModelsView from "../components/views/ModelsView";
 import { 
   ShieldCheck, 
   Bot,
@@ -772,6 +778,20 @@ export default function Home() {
         const recentLogs = auditLogs.slice(0, 6);
         const activeModelName = currentModel?.display_name || currentModel?.model_id || "gemma3:4b";
 
+        return <DashboardView
+          username={user?.username}
+          role={user?.role}
+          activeModelName={activeModelName}
+          documentCount={documents.length}
+          documentsLoading={documentsLoading}
+          conversationCount={conversations.length}
+          conversationsLoading={conversationsLoading}
+          recentLogs={recentLogs}
+          latestMessage={messages.length ? { content: messages[messages.length - 1].content, sourceCount: messages[messages.length - 1].sources?.length } : undefined}
+          onNavigate={setActiveTab}
+          onNewConversation={handleNewConversation}
+        />;
+
         return (
           <div className="space-y-6 font-sans max-w-[1600px] mx-auto pb-8">
             {/* HEADER */}
@@ -1123,7 +1143,7 @@ export default function Home() {
         const activeModelDisplay = currentModel?.display_name || currentModel?.model_id || "gemma3:4b";
 
         return (
-          <div className="space-y-6 font-sans max-w-[1600px] mx-auto pb-6">
+          <div className="aegis-operational-view aegis-assistant-view space-y-6 font-sans max-w-[1600px] mx-auto pb-6">
             {/* TOP ASSISTANT HEADER BAR */}
             <div className="bg-[#0d1322]/90 border border-slate-800/80 backdrop-blur-xl rounded-2xl p-6 sm:p-7 flex flex-col lg:flex-row lg:items-center justify-between gap-6 shadow-xl">
               <div className="space-y-1.5">
@@ -1574,8 +1594,10 @@ export default function Home() {
         const isVectorHealthy = healthStatus?.services.vector_store === "healthy";
         const latestDocTimestamp = documents.reduce((max, d) => (d.uploaded_at && d.uploaded_at > max ? d.uploaded_at : max), 0);
 
+        return <KnowledgeBaseView documents={documents} loading={documentsLoading} error={documentsError} query={ragQueryText} setQuery={setRagQueryText} topK={ragTopK} setTopK={setRagTopK} onSearch={() => handleExecuteRagQuery({ preventDefault: () => {} } as React.FormEvent)} searching={ragQueryLoading} result={ragQueryResponse} queryError={ragQueryError} />;
+
         return (
-          <div className="space-y-8 font-sans max-w-[1500px] mx-auto pb-12">
+          <div className="aegis-operational-view aegis-knowledge-view space-y-8 font-sans max-w-[1500px] mx-auto pb-12">
             {/* PAGE HEADER */}
             <div className="bg-[#0c1220] border border-slate-800/80 rounded-2xl p-6 sm:p-8 flex flex-col md:flex-row md:items-center justify-between gap-6 shadow-xl relative overflow-hidden">
               <div className="space-y-2 relative z-10">
@@ -2084,8 +2106,10 @@ export default function Home() {
           return matchesSearch && matchesType && matchesStatus;
         });
 
+        return <DocumentsView documents={documents} loading={documentsLoading} error={documentsError} file={selectedFile} uploading={uploading} uploadSuccess={uploadSuccess} uploadError={uploadError} search={docSearchQuery} setSearch={setDocSearchQuery} status={docStatusFilter} setStatus={setDocStatusFilter} type={docTypeFilter} setType={setDocTypeFilter} onFile={setSelectedFile} onUpload={() => handleUploadFile({ preventDefault: () => {} } as React.FormEvent)} onRefresh={loadDocuments} onReindex={handleReindex} onDelete={handleDelete} reindexing={reindexingDocId} deleting={deletingDocId} />;
+
         return (
-          <div className="space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
+          <div className="aegis-operational-view aegis-documents-view space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
             {/* Header & Actions */}
             <div className="border-b border-white/5 pb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
@@ -2286,8 +2310,10 @@ export default function Home() {
         const vramPercentage = Math.min(Math.round((activeVram / 6) * 100), 100);
         const isRuntimeConnected = healthStatus?.services.ai_runtime === "healthy";
 
+        return <ModelsView models={modelRegistry} current={currentModel} loading={modelsLoading} error={modelsError} runtimeHealthy={isRuntimeConnected} switching={swappingModelId} testing={testingModelId} test={testResult} onSelect={handleSelectModel} onTest={handleTestInference} />;
+
         return (
-          <div className="space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
+          <div className="aegis-operational-view aegis-models-view space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
             {/* Page Header */}
             <div className="border-b border-white/5 pb-6">
               <h1 className="text-2xl font-bold tracking-tight text-slate-100 uppercase">Local Model Management</h1>
@@ -2563,7 +2589,7 @@ export default function Home() {
         const DEFAULT_EXAMPLE_CODE = "print('=== Basic Aegis Sandbox Test ===')\nx = 10\ny = 20\nprint(f'Sum Calculation: {x} + {y} = {x + y}')";
 
         return (
-          <div className="space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
+          <div className="aegis-operational-view aegis-sandbox-view space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
             {/* Page Header */}
             <div className="border-b border-white/5 pb-6">
               <h1 className="text-2xl font-bold tracking-tight text-slate-100 uppercase">Secure Code Execution</h1>
@@ -2811,7 +2837,7 @@ export default function Home() {
         const sandboxEvts = auditSummary?.sandbox_events ?? auditLogs.filter(l => l.action === "SANDBOX_EXECUTION").length;
 
         return (
-          <div className="space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
+          <div className="aegis-operational-view aegis-audit-view space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
             {/* Page Header */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-white/5 pb-6 gap-4">
               <div>
@@ -3190,7 +3216,7 @@ export default function Home() {
         const adminUsers = usersList.filter(u => u.role === "admin").length;
 
         return (
-          <div className="space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
+          <div className="aegis-operational-view aegis-access-view space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
             {/* Page Header */}
             <div className="border-b border-white/5 pb-6">
               <h1 className="text-2xl font-bold tracking-tight text-slate-100 uppercase">Access Control</h1>
@@ -3507,9 +3533,15 @@ export default function Home() {
         );
       }
 
+      case "about": {
+        return <AboutView />;
+      }
+
       case "settings": {
+        return <SettingsView passwordForm={passwordForm} setPasswordForm={setPasswordForm} onSubmit={handleUserChangePassword} loading={passwordChanging} success={passwordChangeSuccess} error={passwordChangeError} />;
+
         return (
-          <div className="space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
+          <div className="aegis-operational-view aegis-settings-view space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
             {/* Page Header */}
             <div className="border-b border-white/5 pb-6">
               <h1 className="text-2xl font-bold tracking-tight text-slate-100 uppercase">System Settings</h1>
