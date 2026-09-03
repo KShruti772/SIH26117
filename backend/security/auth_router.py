@@ -118,13 +118,6 @@ async def login(request: Request, db: sqlite3.Connection = Depends(get_db)):
     # Generic verification response to prevent credentials mining attacks
     if not user or not verify_password(password, user["password_hash"]):
         AuditLogger.log_event(
-            action="AUTH_LOGIN",
-            component="security.auth_router",
-            status="failure",
-            username=username,
-            metadata={"username": username, "error_category": "invalid_credentials"}
-        )
-        AuditLogger.log_event(
             action="LOGIN_FAILED",
             component="security.auth_router",
             status="failure",
@@ -138,15 +131,6 @@ async def login(request: Request, db: sqlite3.Connection = Depends(get_db)):
         )
         
     if not user["is_active"]:
-        AuditLogger.log_event(
-            action="AUTH_LOGIN",
-            component="security.auth_router",
-            status="failure",
-            user_id=user["id"],
-            username=user["username"],
-            role=user["role"],
-            metadata={"username": user["username"], "error_category": "inactive_profile"}
-        )
         AuditLogger.log_event(
             action="LOGIN_FAILED",
             component="security.auth_router",
@@ -163,15 +147,6 @@ async def login(request: Request, db: sqlite3.Connection = Depends(get_db)):
         
     access_token = create_access_token(subject=user["username"], role=user["role"])
     
-    AuditLogger.log_event(
-        action="AUTH_LOGIN",
-        component="security.auth_router",
-        status="success",
-        user_id=user["id"],
-        username=user["username"],
-        role=user["role"],
-        metadata={"username": user["username"], "role": user["role"]}
-    )
     AuditLogger.log_event(
         action="LOGIN_SUCCESS",
         component="security.auth_router",
@@ -210,15 +185,6 @@ async def logout(request: Request, current_user: sqlite3.Row = Depends(get_curre
         role=current_user["role"],
         metadata={"username": current_user["username"]}
     )
-    AuditLogger.log_event(
-        action="LOGOUT",
-        component="security.auth_router",
-        status="success",
-        user_id=current_user["id"],
-        username=current_user["username"],
-        role=current_user["role"],
-        metadata={"username": current_user["username"]}
-    )
     return {"status": "success", "message": "Successfully logged out"}
 
 @router.post("/change-password", status_code=status.HTTP_200_OK)
@@ -244,14 +210,6 @@ async def change_password(
     
     AuditLogger.log_event(
         action="AUTH_CHANGE_PASSWORD",
-        component="security.auth_router",
-        status="success",
-        user_id=current_user["id"],
-        username=current_user["username"],
-        role=current_user["role"]
-    )
-    AuditLogger.log_event(
-        action="PASSWORD_CHANGED",
         component="security.auth_router",
         status="success",
         user_id=current_user["id"],

@@ -3,9 +3,16 @@ import sys
 import uuid
 import time
 import shutil
+import sqlite3
 import subprocess
 import logging
-from typing import Dict, Any, Optional
+import hashlib
+import mimetypes
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional, List, Union
+
+from backend.security.database import get_db_path
+from backend.security.audit import AuditLogger
 
 logger = logging.getLogger("aegis.sandbox")
 
@@ -16,32 +23,56 @@ class SandboxError(Exception):
 class BaseSandbox:
     """Interface class to allow future swap of execution sandbox backends (e.g., to Docker/microVMs)."""
     
-    def execute(self, code: str, timeout_seconds: float = 10.0) -> Dict[str, Any]:
+    def execute(
+        self,
+        code: str,
+        timeout_seconds: float = 10.0,
+        files: Optional[Dict[str, Union[bytes, str]]] = None,
+        user_id: Optional[int] = None,
+        username: Optional[str] = None,
+        conversation_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Executes untrusted code and returns a structured status dictionary."""
         raise NotImplementedError
+
+    def execute_code(
+        self,
+        code: str,
+        language: str = "python",
+        files: Optional[Dict[str, Union[bytes, str]]] = None,
+        timeout_seconds: float = 10.0,
+        user_id: Optional[int] = None,
+        username: Optional[str] = None,
+        conversation_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Tool interface contract for agentic code execution."""
+        return self.execute(
+            code=code,
+            timeout_seconds=timeout_seconds,
+            files=files,
+            user_id=user_id,
+            username=username,
+            conversation_id=conversation_id
+        )
 
 class SubprocessSandbox(BaseSandbox):
     """
     Subprocess-based sandbox executing Python code in an isolated child process.
-    
-    ---------------------------------------------------------------------------
-    SECURITY BOUNDARY NOTICE (WINDOWS PLATFORM LIMITATIONS):
-    ---------------------------------------------------------------------------
-    1. This sandbox runs code in a separate subprocess with a scrubbed environment.
-    2. ON WINDOWS: It does NOT enforce network namespaces or filesystem jails.
-       The child process inherits the OS user account permissions, meaning it
-       can read/write accessible local files outside the workspace and open
-       outbound TCP sockets (network access is NOT blocked natively).
-    3. FOR PRODUCTION/AIR-GAP: Fully secure isolation requires deploying Aegis
-       on Linux with Docker container isolations (using --network none) or 
-       MicroVM virtualization. This implementation is an MVP-grade local executor.
-    ---------------------------------------------------------------------------
+    Provides strict AST pre-execution inspection, restricted scrubbed environment,
+    controlled input file mounting, output artifact collection, timeout guards, and audit trails.
     """
     
-    def __init__(self, workspace_parent: str = "sandbox_runs", output_limit_bytes: int = 65536):
+    def __init__(
+        self,
+        workspace_parent: str = "sandbox_runs",
+        artifacts_storage: str = "data/artifacts/sandbox",
+        output_limit_bytes: int = 65536
+    ):
         self.workspace_parent = os.path.abspath(workspace_parent)
+        self.artifacts_storage = os.path.abspath(artifacts_storage)
         self.output_limit_bytes = output_limit_bytes
         os.makedirs(self.workspace_parent, exist_ok=True)
+        os.makedirs(self.artifacts_storage, exist_ok=True)
 
     @staticmethod
     def _validate_ast_safety(code: str) -> Optional[str]:
@@ -62,72 +93,89 @@ class SubprocessSandbox(BaseSandbox):
                         if mod in forbidden_modules:
                             return f"Forbidden module import detected: '{node.module}'"
         except SyntaxError as e:
-            return f"Syntax error in code string: {e}"
+            return f"SyntaxError in code string: {e}"
         return None
 
-    def execute(self, code: str, timeout_seconds: float = 10.0) -> Dict[str, Any]:
-        """Executes Python code in a separate process, managing execution limits and cleanup."""
-        from backend.security.audit import AuditLogger
-        
+    def execute(
+        self,
+        code: str,
+        timeout_seconds: float = 10.0,
+        files: Optional[Dict[str, Union[bytes, str]]] = None,
+        user_id: Optional[int] = None,
+        username: Optional[str] = None,
+        conversation_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Executes Python code in a separate process, managing execution limits, input files, artifacts, and cleanup."""
+        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest() if isinstance(code, str) else None
+
+        def rejected_result(error: str) -> Dict[str, Any]:
+            AuditLogger.log_event(
+                action="SANDBOX_EXECUTION",
+                component="sandbox.subprocess",
+                status="failure",
+                user_id=user_id,
+                username=username,
+                metadata={
+                    "error": error,
+                    "code_hash": code_hash,
+                    "language": "python"
+                }
+            )
+            return {
+                "execution_id": None,
+                "success": False,
+                "status": "FAILED",
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": error,
+                "timed_out": False,
+                "duration_ms": 0,
+                "execution_time_ms": 0,
+                "code_hash": code_hash,
+                "language": "python",
+                "artifacts": [],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "error": error
+            }
+
         # 1. Input validation
         if not isinstance(code, str) or not code.strip():
-            AuditLogger.log_event(
-                action="SANDBOX_EXECUTION",
-                component="tools.code_sandbox.sandbox",
-                status="failure",
-                metadata={"error_category": "invalid_code"}
-            )
-            return {
-                "success": False,
-                "exit_code": -1,
-                "stdout": "",
-                "stderr": "",
-                "timed_out": False,
-                "duration_ms": 0,
-                "error": "Rejected: Empty or invalid code string."
-            }
+            return rejected_result("Rejected: Empty or invalid code string.")
             
         if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0 or timeout_seconds > 60:
-            AuditLogger.log_event(
-                action="SANDBOX_EXECUTION",
-                component="tools.code_sandbox.sandbox",
-                status="failure",
-                metadata={"error_category": "invalid_timeout"}
-            )
-            return {
-                "success": False,
-                "exit_code": -1,
-                "stdout": "",
-                "stderr": "",
-                "timed_out": False,
-                "duration_ms": 0,
-                "error": "Rejected: Timeout must be a positive float between 0.1 and 60.0 seconds."
-            }
+            return rejected_result("Rejected: Timeout must be a positive float between 0.1 and 60.0 seconds.")
 
         # AST Pre-Execution Security Inspection
         ast_violation = self._validate_ast_safety(code)
         if ast_violation:
-            AuditLogger.log_event(
-                action="SANDBOX_EXECUTION",
-                component="tools.code_sandbox.sandbox",
-                status="failure",
-                metadata={"error_category": "ast_forbidden_import"}
-            )
-            return {
-                "success": False,
-                "exit_code": -1,
-                "stdout": "",
-                "stderr": "",
-                "timed_out": False,
-                "duration_ms": 0,
-                "error": f"Security Rejection: {ast_violation}"
-            }
+            return rejected_result(f"Security Rejection: {ast_violation}")
 
         # 2. Setup isolated temporary workspace
         run_id = f"run_{uuid.uuid4()}"
         run_dir = os.path.join(self.workspace_parent, run_id)
         os.makedirs(run_dir, exist_ok=True)
         
+        # 3. Mount input files safely
+        mounted_input_names = set()
+        if files and isinstance(files, dict):
+            for fname, fcontent in files.items():
+                if not fname or ".." in fname or "/" in fname or "\\" in fname:
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    return rejected_result(f"Security Rejection: Invalid input filename '{fname}' (path traversal blocked).")
+                
+                target_file_path = os.path.join(run_dir, fname)
+                try:
+                    if isinstance(fcontent, bytes):
+                        with open(target_file_path, "wb") as fh:
+                            fh.write(fcontent)
+                    elif isinstance(fcontent, str):
+                        with open(target_file_path, "w", encoding="utf-8") as fh:
+                            fh.write(fcontent)
+                    mounted_input_names.add(fname)
+                except Exception as fe:
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    return rejected_result(f"Input file mounting failed for '{fname}': {fe}")
+
         socket_block_prefix = (
             "import socket\n"
             "def _blocked_socket(*args, **kwargs):\n"
@@ -138,11 +186,9 @@ class SubprocessSandbox(BaseSandbox):
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(socket_block_prefix + code)
 
-        # 3. Environment restriction
-        # Scrub all parent variables (secrets, DB URLs, API keys)
-        # Inherit only essential Windows environment paths required to spawn Python
+        # 4. Environment restriction (strip all host secrets, DB URLs, credentials)
         safe_env = {}
-        for key in ["SYSTEMROOT", "SYSTEMDRIVE", "PATH", "PATHEXT", "TEMP", "TMP"]:
+        for key in ["SYSTEMROOT", "SYSTEMDRIVE", "PATH", "PATHEXT", "TEMP", "TMP", "TMPDIR", "HOME", "USER", "LANG", "LC_ALL", "PYTHONPATH"]:
             if key in os.environ:
                 safe_env[key] = os.environ[key]
         
@@ -155,9 +201,8 @@ class SubprocessSandbox(BaseSandbox):
         stderr = ""
         error_msg = None
         
-        # 4. Spawning Python subprocess
+        # 5. Spawning Python subprocess
         try:
-            # Use current virtual env Python or fallback to standard system python
             python_executable = sys.executable
             proc = subprocess.Popen(
                 [python_executable, script_path],
@@ -169,17 +214,14 @@ class SubprocessSandbox(BaseSandbox):
             )
             
             try:
-                # Capture standard outputs with timeout limit
                 stdout, stderr = proc.communicate(timeout=timeout_seconds)
                 exit_code = proc.returncode
             except subprocess.TimeoutExpired:
                 timed_out = True
                 proc.terminate()
                 try:
-                    # Allow graceful shutdown time
                     stdout, stderr = proc.communicate(timeout=2.0)
                 except subprocess.TimeoutExpired:
-                    # Force kill child process
                     proc.kill()
                     stdout, stderr = proc.communicate()
                 exit_code = -1
@@ -191,7 +233,7 @@ class SubprocessSandbox(BaseSandbox):
         
         duration_ms = int((time.perf_counter() - start_time) * 1000)
 
-        # 5. Output limit checks (protect from print flood loops)
+        # 6. Output limit checks
         if len(stdout) > self.output_limit_bytes:
             stdout = stdout[:self.output_limit_bytes] + "\n... [TRUNCATED: Output limit exceeded]"
             error_msg = error_msg or "Output limit exceeded."
@@ -202,36 +244,103 @@ class SubprocessSandbox(BaseSandbox):
             error_msg = error_msg or "Output limit exceeded."
             exit_code = -1
 
-        # 6. Graceful workspace directory cleanup
+        # 7. Collect generated artifact files
+        artifacts: List[Dict[str, Any]] = []
+        try:
+            db_path = get_db_path()
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            for item in os.listdir(run_dir):
+                if item == "script.py" or item in mounted_input_names:
+                    continue
+                
+                item_path = os.path.join(run_dir, item)
+                if os.path.isfile(item_path):
+                    with open(item_path, "rb") as afh:
+                        art_bytes = afh.read()
+                    
+                    art_size = len(art_bytes)
+                    art_hash = hashlib.sha256(art_bytes).hexdigest()
+                    art_id = f"art_{uuid.uuid4().hex[:12]}"
+                    mime, _ = mimetypes.guess_type(item)
+                    mime_type = mime or "application/octet-stream"
+
+                    # Persist file into sandbox artifacts storage
+                    perm_path = os.path.join(self.artifacts_storage, f"{art_id}_{item}")
+                    with open(perm_path, "wb") as pfh:
+                        pfh.write(art_bytes)
+
+                    # Record in SQLite sandbox_artifacts table
+                    cursor.execute("""
+                        INSERT INTO sandbox_artifacts (
+                            id, execution_id, user_id, username, conversation_id,
+                            filename, file_path, file_size, mime_type, content_hash, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        art_id, run_id, user_id or -1, username or "", conversation_id or "",
+                        item, perm_path, art_size, mime_type, art_hash, now_iso
+                    ))
+
+                    artifacts.append({
+                        "id": art_id,
+                        "filename": item,
+                        "file_size": art_size,
+                        "mime_type": mime_type,
+                        "content_hash": art_hash,
+                        "download_url": f"/sandbox/artifacts/{art_id}/download",
+                        "created_at": now_iso
+                    })
+            
+            conn.commit()
+            conn.close()
+        except Exception as arte:
+            logger.warning(f"Error collecting sandbox artifacts for run {run_id}: {arte}")
+
+        # 8. Graceful workspace directory cleanup
         try:
             shutil.rmtree(run_dir)
         except Exception as e:
             logger.warning(f"Failed to clean up sandbox directory '{run_dir}': {e}")
 
         success = (exit_code == 0) and not timed_out and (error_msg is None)
+        logger.info(f"Sandbox run ID {run_id} completed in {duration_ms}ms with success={success}, artifacts={len(artifacts)}")
         
-        logger.info(f"Sandbox run ID {run_id} completed in {duration_ms}ms with success={success}")
-        
+        # 9. Audit sandbox execution
         AuditLogger.log_event(
             action="SANDBOX_EXECUTION",
-            component="tools.code_sandbox.sandbox",
+            component="sandbox.subprocess",
             status="success" if success else "failure",
             resource=run_id,
             duration_ms=duration_ms,
+            user_id=user_id,
+            username=username,
             metadata={
+                "execution_id": run_id,
+                "exit_code": exit_code,
+                "timed_out": timed_out,
                 "duration_ms": duration_ms,
-                "sandbox_exit_code": exit_code,
-                "sandbox_timeout": timed_out,
-                "error_category": "timeout" if timed_out else ("launch_failure" if error_msg else None)
+                "artifact_count": len(artifacts),
+                "artifacts": [a["filename"] for a in artifacts],
+                "language": "python",
+                "code_hash": code_hash
             }
         )
-        
+
         return {
+            "execution_id": run_id,
             "success": success,
+            "status": "SUCCESS" if success else "FAILED",
             "exit_code": exit_code,
             "stdout": stdout,
             "stderr": stderr,
             "timed_out": timed_out,
             "duration_ms": duration_ms,
-            "error": error_msg
+            "execution_time_ms": duration_ms,
+            "code_hash": code_hash,
+            "language": "python",
+            "artifacts": artifacts,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": error_msg or (stderr if not success and stderr else None)
         }

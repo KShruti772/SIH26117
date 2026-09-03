@@ -64,7 +64,7 @@ class ModelLoaderManager:
         Discovers locally installed models from Ollama runtime via GET /api/tags,
         merges with configured registry metadata, and determines active/installed status.
         """
-        active_id = await self.get_current_model_id() or self.current_model_id or "gemma3:4b"
+        active_id = await self.get_current_model_id()
         installed_ollama_models = []
         try:
             res = await asyncio.to_thread(self._send_request, "/api/tags", "GET", timeout=5.0)
@@ -200,11 +200,12 @@ class ModelLoaderManager:
         prompt: str,
         system_prompt: Optional[str] = None,
         model_id: Optional[str] = None,
+        images: Optional[List[str]] = None,
         timeout: float = 60.0
     ) -> str:
         """
         Asynchronously verifies local Ollama availability, resolves model names,
-        and generates response text via local Ollama HTTP endpoints.
+        and generates response text (with optional base64 multimodal images) via local Ollama HTTP endpoints.
         """
         if not prompt or not prompt.strip():
             raise ModelLoaderError("Prompt text cannot be empty.")
@@ -216,7 +217,28 @@ class ModelLoaderManager:
             )
 
         # 2. Resolve target runtime model name
-        target_model = model_id or self.current_model_id or "gemma3:4b"
+        target_model = model_id or self.current_model_id
+        if not target_model:
+            # Dynamically auto-resolve from active VRAM models or discovered local models
+            active_id = await self.get_current_model_id()
+            if active_id:
+                target_model = active_id
+                self.current_model_id = active_id
+            else:
+                running = await self.get_running_models()
+                if running:
+                    target_model = running[0]
+                    self.current_model_id = running[0]
+                else:
+                    discovered = await self.get_discovered_models()
+                    installed = [d for d in discovered if d.get("status") in ("ACTIVE", "INSTALLED")]
+                    if installed:
+                        target_model = installed[0].get("model_id") or installed[0].get("runtime_model_name")
+                        self.current_model_id = target_model
+
+        if not target_model:
+            raise RuntimeUnavailableError("No active local model is currently reported by the inference runtime.")
+
         runtime_model = target_model
         try:
             profile = self.registry_manager.get_model(target_model)
@@ -232,6 +254,8 @@ class ModelLoaderManager:
         }
         if system_prompt:
             payload["system"] = system_prompt
+        if images and isinstance(images, list) and len(images) > 0:
+            payload["images"] = images
 
         # 4. Dispatch async request to local daemon
         try:

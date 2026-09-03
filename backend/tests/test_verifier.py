@@ -38,12 +38,24 @@ class TestAegisVerifier(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_printed_citation_parsing(self):
-        """5. Verify the verifier extracts structured citation coordinates correctly."""
+        """5. Verify the verifier extracts structured citation coordinates correctly across formats."""
         citations = self.verifier.parse_citations(self.output_with_valid_citation)
         self.assertEqual(len(citations), 1)
         self.assertEqual(citations[0]["source"], "shutdown_rules.pdf")
         self.assertEqual(citations[0]["page"], 3)
         self.assertEqual(citations[0]["chunk_id"], "rule_c3")
+
+        # Test pipe-separated format: [Source: file.pdf | Page 3]
+        pipe_citations = self.verifier.parse_citations("According to specs [Source: shutdown_rules.pdf | Page 3].")
+        self.assertEqual(len(pipe_citations), 1)
+        self.assertEqual(pipe_citations[0]["source"], "shutdown_rules.pdf")
+        self.assertEqual(pipe_citations[0]["page"], 3)
+
+        # Test simple source format: [Source: shutdown_rules.pdf]
+        simple_citations = self.verifier.parse_citations("According to specs [Source: shutdown_rules.pdf].")
+        self.assertEqual(len(simple_citations), 1)
+        self.assertEqual(simple_citations[0]["source"], "shutdown_rules.pdf")
+        self.assertEqual(simple_citations[0]["page"], 1)
 
     def test_grounding_verification_success(self):
         """1, 5, 6, 8, 10. Verify successful grounding check when citations and overlap are valid."""
@@ -52,6 +64,29 @@ class TestAegisVerifier(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(res.score, 0.7)
         self.assertEqual(res.citation_count, 1)
         self.assertEqual(len(res.evidence), 1)
+
+    def test_grounding_verification_pipe_format_success(self):
+        """Verify pipe-formatted citation passes grounding verification."""
+        pipe_out = "Pressure limit for check valve V-101 is capped at 150 PSI. [Source: shutdown_rules.pdf | Page 3]"
+        res = self.verifier.verify(pipe_out, self.valid_rag_results)
+        self.assertTrue(res.passed)
+        self.assertGreaterEqual(res.score, 0.7)
+
+    def test_honest_refusal_callback_pass(self):
+        """Verify honest refusal when document has no info passes verification callback without retry failure."""
+        verify_cb = make_grounding_verify_callback(self.verifier)
+        step = AgentStep("s2", "generate answer", "text_generation", {"action": "generate_answer"})
+        step.output = "The indexed organizational documents do not contain information to answer this question."
+        plan = AgentPlan("What is the company cafeteria menu?")
+        
+        rag_step = AgentStep("s1", "rag search", "text_generation", {"action": "rag_search"})
+        rag_step.output = self.valid_rag_results
+        plan.steps = [rag_step, step]
+        plan.current_step_index = 1
+        
+        passed = verify_cb(plan, step)
+        self.assertTrue(passed)
+        self.assertIn("Honest ungrounded notice", step.verification_result)
 
     def test_missing_evidence(self):
         """2. Verify grounding fails when no vector evidence context is provided."""

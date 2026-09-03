@@ -66,10 +66,16 @@ class LocalTransformerEmbeddingModel(BaseEmbeddingModel):
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_DATASETS_OFFLINE"] = "1"
         if not os.path.exists(self.model_path):
-            raise RuntimeError(
-                f"Local embedding model is unavailable. Directory not found at: '{self.model_path}'.\n"
-                f"Air-Gapped Requirements: Download 'all-MiniLM-L6-v2' and place files into '{self.model_path}'."
-            )
+            # Only fallback if default model name was provided
+            if os.path.basename(self.model_path) == "all-MiniLM-L6-v2":
+                root_fallback = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models", "all-MiniLM-L6-v2"))
+                if os.path.exists(root_fallback):
+                    self.model_path = root_fallback
+            if not os.path.exists(self.model_path):
+                raise RuntimeError(
+                    f"Local embedding model is unavailable. Directory not found at: '{self.model_path}'.\n"
+                    f"Air-Gapped Requirements: Download 'all-MiniLM-L6-v2' and place files into '{self.model_path}'."
+                )
         try:
             from sentence_transformers import SentenceTransformer
             logger.info(f"Loading local SentenceTransformer model weights from: '{self.model_path}'...")
@@ -105,6 +111,10 @@ def get_local_embedding_model(model_path: str = "./models/all-MiniLM-L6-v2") -> 
     """Returns singleton instance of LocalTransformerEmbeddingModel to avoid reloading weights per request."""
     global _singleton_embedding_model
     abs_path = os.path.abspath(model_path)
+    if not os.path.exists(abs_path):
+        root_fallback = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models", "all-MiniLM-L6-v2"))
+        if os.path.exists(root_fallback):
+            abs_path = root_fallback
     if _singleton_embedding_model is None or _singleton_embedding_model.model_path != abs_path:
         _singleton_embedding_model = LocalTransformerEmbeddingModel(abs_path)
     return _singleton_embedding_model

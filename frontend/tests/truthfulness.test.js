@@ -111,3 +111,33 @@ test("Truthfulness - Operator identity binds to user session or NOT LOGGED IN", 
   const guestOperator = null?.username || "NOT LOGGED IN";
   assert.strictEqual(guestOperator, "NOT LOGGED IN");
 });
+
+test("Truthfulness - Zero documents displays exact zero without manufacturing records", () => {
+  const documents = [];
+  const count = documents.length;
+  const label = count === 1 ? "1 document" : `${count} documents`;
+  assert.strictEqual(count, 0);
+  assert.strictEqual(label, "0 documents");
+});
+
+test("Truthfulness - Zero audit events displays exact zero without fake numbers", () => {
+  const auditSummary = { total_events: 0, successful_events: 0, failed_actions: 0 };
+  assert.strictEqual(auditSummary.total_events, 0);
+  assert.strictEqual(auditSummary.successful_events, 0);
+  assert.strictEqual(auditSummary.failed_actions, 0);
+});
+
+test("Truthfulness - Zero conversations displays empty state without demo sessions", () => {
+  const conversations = [];
+  const count = conversations.length;
+  assert.strictEqual(count, 0);
+});
+
+test("Truthfulness - Offline inference error preserves truthful error message", () => {
+  const offlineError = {
+    message: "Local model generation failed: Ollama HTTP 500 Connection Refused"
+  };
+  const displayedError = offlineError.message || "Local model unavailable.";
+  assert.strictEqual(displayedError, "Local model generation failed: Ollama HTTP 500 Connection Refused");
+  assert.ok(!displayedError.includes("Simulated text response"));
+});

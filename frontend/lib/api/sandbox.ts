@@ -11,7 +11,12 @@ export interface SandboxExecutionResponse {
   stdout: string;
   stderr: string;
   timed_out: boolean;
-  duration_ms: number;
+  duration_ms: number | null;
+  execution_id?: string;
+  execution_time_ms?: number | null;
+  code_hash?: string;
+  language?: string;
+  timestamp?: string;
   error: string | null;
 }
 

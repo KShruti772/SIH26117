@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 import sqlite3
 import unittest
 import json
@@ -19,7 +21,8 @@ from backend.security.audit import (
 )
 from backend.security.auth import create_access_token
 
-TEST_DB_PATH = "data/private/aegis_audit_test.db"
+TEST_TEMP_DIR = tempfile.mkdtemp(prefix="aegis_audit_test_")
+TEST_DB_PATH = os.path.join(TEST_TEMP_DIR, "aegis_audit_test.db")
 
 def get_test_db():
     conn = sqlite3.connect(TEST_DB_PATH, check_same_thread=False)
@@ -53,11 +56,7 @@ class TestAegisAudit(unittest.TestCase):
         from backend.app.main import app
         app.dependency_overrides.clear()
         settings.AUTH_DB_PATH = cls.original_db_path
-        if os.path.exists(TEST_DB_PATH):
-            try:
-                os.remove(TEST_DB_PATH)
-            except Exception:
-                pass
+        shutil.rmtree(TEST_TEMP_DIR, ignore_errors=True)
 
     def setUp(self):
         # Clear audit log entries before every test
@@ -288,13 +287,25 @@ class TestAegisAudit(unittest.TestCase):
         self.assertGreaterEqual(len(logs_success), 1)
         self.assertEqual(logs_success[0]["status"], "success")
 
+    def test_each_login_attempt_creates_one_canonical_event(self):
+        """A login attempt must not create duplicate legacy and canonical rows."""
+        self.client.post("/auth/register", json={"username": "one_event_user", "password": "securepassword123"})
+
+        self.client.post("/auth/login", json={"username": "one_event_user", "password": "wrongpassword"})
+        failed = AuditLogger.query_audit_logs(action="LOGIN_FAILED", username="one_event_user")
+        self.assertEqual(len(failed), 1)
+
+        self.client.post("/auth/login", json={"username": "one_event_user", "password": "securepassword123"})
+        successful = AuditLogger.query_audit_logs(action="LOGIN_SUCCESS", username="one_event_user")
+        self.assertEqual(len(successful), 1)
+
     def test_logout_event_audited(self):
         """3. Verify logout creates LOGOUT audit event."""
         self.client.post("/auth/register", json={"username": "logout_test_user", "password": "securepassword123"})
         tok = self.client.post("/auth/login", json={"username": "logout_test_user", "password": "securepassword123"}).json()["access_token"]
         
         self.client.post("/auth/logout", headers={"Authorization": f"Bearer {tok}"})
-        logs = AuditLogger.query_audit_logs(action="LOGOUT")
+        logs = AuditLogger.query_audit_logs(action="AUTH_LOGOUT")
         self.assertGreaterEqual(len(logs), 1)
         self.assertEqual(logs[0]["username"], "logout_test_user")
 
@@ -308,7 +319,7 @@ class TestAegisAudit(unittest.TestCase):
             json={"old_password": "securepassword123", "new_password": "newsecurepassword123"},
             headers={"Authorization": f"Bearer {tok}"}
         )
-        logs = AuditLogger.query_audit_logs(action="PASSWORD_CHANGED")
+        logs = AuditLogger.query_audit_logs(action="AUTH_CHANGE_PASSWORD")
         self.assertGreaterEqual(len(logs), 1)
 
     def test_model_operations_audited(self):
@@ -340,6 +351,20 @@ class TestAegisAudit(unittest.TestCase):
         self.client.post("/sandbox/execute", json={"code": "print('hello')", "timeout_seconds": 5}, headers={"Authorization": f"Bearer {tok}"})
         logs_sb = AuditLogger.query_audit_logs(action="SANDBOX_EXECUTION")
         self.assertGreaterEqual(len(logs_sb), 1)
+
+    def test_sandbox_audit_contains_actual_result(self):
+        """The route audit event records the subprocess result, not placeholders."""
+        self.client.post("/auth/register", json={"username": "sandbox_audit_user", "password": "securepassword123"})
+        tok = self.client.post("/auth/login", json={"username": "sandbox_audit_user", "password": "securepassword123"}).json()["access_token"]
+
+        response = self.client.post("/sandbox/execute", json={"code": "print('actual output')"}, headers={"Authorization": f"Bearer {tok}"})
+        self.assertEqual(response.status_code, 200)
+        event = AuditLogger.query_audit_logs(action="SANDBOX_EXECUTION", username="sandbox_audit_user")[0]
+        metadata = json.loads(event["metadata_json"])
+        self.assertEqual(metadata["stdout"], "actual output\n")
+        self.assertEqual(metadata["stderr"], "")
+        self.assertEqual(metadata["sandbox_exit_code"], 0)
+        self.assertEqual(event["status"], "success")
 
 if __name__ == "__main__":
     unittest.main()

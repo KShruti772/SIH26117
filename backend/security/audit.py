@@ -37,10 +37,17 @@ VALID_ACTIONS = {
     "MODEL_SWITCH",
     "MODEL_SELECTED",
     "MODEL_TESTED",
+    "MODEL_LOADED",
+    "MODEL_UNLOADED",
+    "MODEL_INFERENCE",
+    "MODEL_ROUTED",
 
     # RAG Actions
     "RAG_SEARCH",
     "RAG_QUERY",
+    "RAG_QUERY_STARTED",
+    "RAG_QUERY_COMPLETED",
+    "RAG_QUERY_FAILED",
     "RAG_DOCUMENT_UPLOAD",
     "RAG_DOCUMENT_INDEX",
     "DOCUMENT_INGEST",
@@ -48,13 +55,35 @@ VALID_ACTIONS = {
     "DOCUMENT_INDEXED",
     "DOCUMENT_DELETED",
     "DOCUMENT_ACCESS_DENIED",
+    "DOCUMENT_UPLOAD_STARTED",
+    "DOCUMENT_UPLOAD_COMPLETED",
+    "DOCUMENT_UPLOAD_FAILED",
+    "DOCUMENT_INDEX_STARTED",
+    "DOCUMENT_INDEX_COMPLETED",
+    "DOCUMENT_INDEX_FAILED",
+    "DOCUMENT_INGESTION_STARTED",
+    "DOCUMENT_INGESTION_COMPLETED",
+    "DOCUMENT_INGESTION_FAILED",
     "OCR_PROCESS",
 
     # Execution & Workflows
+    "VISION_ANALYSIS",
     "SANDBOX_EXECUTION",
+    "SANDBOX_EXECUTION_STARTED",
+    "SANDBOX_EXECUTION_COMPLETED",
+    "SANDBOX_EXECUTION_FAILED",
     "DOCUMENT_GENERATION",
+    "DOCUMENT_GENERATED",
+    "DOCUMENT_GENERATION_STARTED",
+    "DOCUMENT_GENERATION_COMPLETED",
+    "DOCUMENT_GENERATION_FAILED",
+    "DOCUMENT_DOWNLOADED",
+    "DOCUMENT_DOWNLOAD_STARTED",
+    "DOCUMENT_DOWNLOAD_COMPLETED",
+    "DOCUMENT_DOWNLOAD_FAILED",
     "AGENT_EXECUTION",
     "CHAT_REQUEST",
+    "CHAT_RESPONSE",
     "VERIFICATION",
 
     # User Administration & System Security
@@ -75,7 +104,11 @@ VALID_ACTIONS = {
 
     # Conversation Actions
     "CONVERSATION_CREATED",
-    "CONVERSATION_DELETED"
+    "CONVERSATION_UPDATED",
+    "CONVERSATION_DELETED",
+    "CONVERSATION_MESSAGE_CREATED",
+    "CHAT_CONVERSATION_CREATED",
+    "CHAT_MESSAGE_CREATED"
 }
 
 # Allowed status taxonomy
@@ -96,6 +129,7 @@ ALLOWED_METADATA_KEYS = {
     "chunk_count",
     "page_count",
     "query_length",
+    "prompt_length",
     "sandbox_exit_code",
     "sandbox_timeout",
     "step_id",
@@ -111,15 +145,38 @@ ALLOWED_METADATA_KEYS = {
     "replan_count",
     "request_id",
     "username",
+    "user_id",
     "role",
     "is_active",
     "action",
     "target_user",
     "details",
     "title",
+    "new_title",
     "success",
+    "id",
+    "document_id",
+    "error",
+    "error_detail",
+    "query",
+    "original_filename",
+    "attempted_by",
     "latency_ms",
-    "query"
+    "rag_used",
+    "verification",
+    "message_id",
+    "feature",
+    "execution_id",
+    "language",
+    "code_hash",
+    "stdout",
+    "stderr",
+    "task_type",
+    "selected_model",
+    "switched",
+    "fallback_used",
+    "required_capabilities",
+    "matched_capabilities"
 }
 
 def get_request_id() -> str:
@@ -151,6 +208,7 @@ class AuditLogger:
         role: Optional[str] = None,
         resource: Optional[str] = None,
         duration_ms: Optional[int] = None,
+        request_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """Appends audit event to SQLite database. Parameterized SQL prevents injection."""
@@ -165,7 +223,7 @@ class AuditLogger:
             return
 
         # 2. Extract correlation attributes from context if omitted by caller
-        req_id = get_request_id()
+        req_id = request_id or get_request_id()
         
         ctx_user = get_current_audit_user()
         if ctx_user:
@@ -190,7 +248,7 @@ class AuditLogger:
         # Limit metadata size
         serialized_meta = None
         if sanitized_meta:
-            serialized_meta = json.dumps(sanitized_meta)
+            serialized_meta = json.dumps(sanitized_meta, default=str)
             if len(serialized_meta) > 1000:
                 serialized_meta = serialized_meta[:997] + "..."
 

@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 import sqlite3
 import unittest
 import hmac
@@ -11,7 +13,8 @@ from backend.security.audit import AuditLogger, request_id_var, current_user_var
 from backend.security.auth import create_access_token, revoke_token, is_token_revoked
 from backend.tools.code_sandbox.sandbox import SubprocessSandbox
 
-TEST_DB_PATH = "data/private/aegis_phase7c_test.db"
+TEST_TEMP_DIR = tempfile.mkdtemp(prefix="aegis_phase7c_test_")
+TEST_DB_PATH = os.path.join(TEST_TEMP_DIR, "aegis_phase7c_test.db")
 
 def get_test_db():
     conn = sqlite3.connect(TEST_DB_PATH, check_same_thread=False)
@@ -42,11 +45,7 @@ class TestPhase7CHardening(unittest.TestCase):
         from backend.app.main import app
         app.dependency_overrides.clear()
         settings.AUTH_DB_PATH = cls.original_db_path
-        if os.path.exists(TEST_DB_PATH):
-            try:
-                os.remove(TEST_DB_PATH)
-            except Exception:
-                pass
+        shutil.rmtree(TEST_TEMP_DIR, ignore_errors=True)
 
     def setUp(self):
         conn = sqlite3.connect(TEST_DB_PATH)

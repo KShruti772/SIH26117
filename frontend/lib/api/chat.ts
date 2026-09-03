@@ -1,5 +1,41 @@
 import { apiFetch } from "./client";
 
+export interface RoutingTelemetry {
+  task_type?: string;
+  selected_model?: string;
+  routing?: string;
+  switched?: boolean;
+  reason?: string;
+  rag_used?: boolean;
+  verification_status?: string;
+  required_capabilities?: string[];
+  matched_capabilities?: string[];
+}
+
+export interface SandboxArtifact {
+  id: string;
+  filename: string;
+  file_size: number;
+  mime_type: string;
+  content_hash: string;
+  download_url: string;
+  created_at: string;
+}
+
+export interface SandboxExecutionResult {
+  execution_id?: string;
+  success: boolean;
+  status: "SUCCESS" | "FAILED";
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  timed_out?: boolean;
+  duration_ms: number;
+  code?: string;
+  artifacts?: SandboxArtifact[];
+  error?: string;
+}
+
 export interface ChatResponse {
   success: boolean;
   session_id?: string;
@@ -9,10 +45,12 @@ export interface ChatResponse {
   request_id: string;
   duration_ms: number;
   rag_used?: boolean;
+  sandbox_execution?: SandboxExecutionResult;
   model_info?: {
     model_id: string;
     inference_mode: string;
   };
+  routing_info?: RoutingTelemetry;
 }
 
 export interface ConversationMessage {
@@ -27,13 +65,21 @@ export interface ConversationMessage {
   request_id?: string;
   verification?: string;
   error_detail?: string;
+  task_type?: string;
+  document_ids?: string[];
+  metadata?: Record<string, any>;
+  routing_info?: RoutingTelemetry;
+  sandbox_execution?: SandboxExecutionResult;
 }
 
 export interface ConversationSession {
   id: string;
   title: string;
+  feature?: string;
+  status?: string;
   created_at: string;
   updated_at: string;
+  last_message_at?: string;
   messages?: ConversationMessage[];
 }
 
@@ -69,6 +115,25 @@ export const chatApi = {
   },
 
   /**
+   * PATCH /conversations/{session_id}
+   * Updates conversation title.
+   */
+  async updateConversation(sessionId: string, title: string): Promise<ConversationSession> {
+    return apiFetch<ConversationSession>(`/conversations/${sessionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    });
+  },
+
+  /**
+   * GET /conversations/{session_id}/messages
+   * Retrieves stored messages array for the conversation.
+   */
+  async getMessages(sessionId: string): Promise<ConversationMessage[]> {
+    return apiFetch<ConversationMessage[]>(`/conversations/${sessionId}/messages`);
+  },
+
+  /**
    * DELETE /conversations/{session_id}
    * Deletes a conversation session.
    */
@@ -86,6 +151,7 @@ export const chatApi = {
     return apiFetch<ChatResponse>("/chat", {
       method: "POST",
       body: JSON.stringify({ message, session_id: sessionId }),
+      timeoutMs: 120000,
     });
   }
 };

@@ -69,47 +69,47 @@ class TestModelLoaderManager(unittest.IsolatedAsyncioTestCase):
     @patch.object(ModelLoaderManager, '_send_request')
     async def test_get_running_models(self, mock_send):
         """Verify active VRAM model listing formats are parsed cleanly."""
-        self.mock_vram = ["qwen2.5:3b-instruct-q4_K_M", "qwen2.5-coder:1.5b-instruct-q4_K_M"]
+        self.mock_vram = ["gemma3:4b", "qwen3:4b"]
         mock_send.side_effect = self.side_effect_send_request
         
         running = await self.loader.get_running_models()
         self.assertEqual(len(running), 2)
-        self.assertIn("qwen2.5:3b-instruct-q4_K_M", running)
+        self.assertIn("gemma3:4b", running)
 
     @patch.object(ModelLoaderManager, '_send_request')
     async def test_switch_model_already_active(self, mock_send):
         """Verify switch returns immediately if target model is already loaded in VRAM."""
-        self.mock_vram = ["qwen2.5:3b-instruct-q4_K_M"]
+        self.mock_vram = ["gemma3:4b"]
         mock_send.side_effect = self.side_effect_send_request
         
-        res = await self.loader.switch_model("qwen2.5-3b-instruct")
+        res = await self.loader.switch_model("gemma3:4b")
         self.assertEqual(res["details"], "already_loaded")
-        self.assertEqual(res["active_model"], "qwen2.5:3b-instruct-q4_K_M")
+        self.assertEqual(res["active_model"], "gemma3:4b")
 
     @patch.object(ModelLoaderManager, '_send_request')
     async def test_switch_model_requires_swap(self, mock_send):
         """Verify sequential swap: unloads active, loads target, verifies loaded."""
-        self.mock_vram = ["qwen2-vl:2b-instruct-q4_K_M"]
+        self.mock_vram = ["qwen3:4b"]
         mock_send.side_effect = self.side_effect_send_request
         
-        res = await self.loader.switch_model("qwen2.5-coder-1.5b-instruct")
+        res = await self.loader.switch_model("gemma3:4b")
             
         self.assertEqual(res["details"], "swapped")
-        self.assertEqual(res["active_model"], "qwen2.5-coder:1.5b-instruct-q4_K_M")
-        self.assertIn("qwen2.5-coder:1.5b-instruct-q4_K_M", self.mock_vram)
-        self.assertNotIn("qwen2-vl:2b-instruct-q4_K_M", self.mock_vram)
+        self.assertEqual(res["active_model"], "gemma3:4b")
+        self.assertIn("gemma3:4b", self.mock_vram)
+        self.assertNotIn("qwen3:4b", self.mock_vram)
 
     @patch.object(ModelLoaderManager, '_send_request')
     async def test_switch_model_unload_timeout(self, mock_send):
         """Verify ModelUnloadTimeoutError triggers if active model fails to unload."""
-        self.mock_vram = ["qwen2-vl:2b-instruct-q4_K_M"]
+        self.mock_vram = ["qwen3:4b"]
         self.unload_succeeds = False  # Simulate unload failing
         mock_send.side_effect = self.side_effect_send_request
         
         # Use short polling / timeout parameters to speed up the test
         with self.assertRaises(ModelUnloadTimeoutError):
             await self.loader.switch_model(
-                "qwen2.5-coder-1.5b-instruct",
+                "gemma3:4b",
                 load_timeout=1.0,
                 unload_timeout=0.05
             )
@@ -122,7 +122,7 @@ class TestModelLoaderManager(unittest.IsolatedAsyncioTestCase):
         
         with self.assertRaises(ModelLoadTimeoutError):
             await self.loader.switch_model(
-                "qwen2.5-coder-1.5b-instruct",
+                "gemma3:4b",
                 load_timeout=0.05,
                 unload_timeout=1.0
             )
@@ -133,14 +133,14 @@ class TestModelLoaderManager(unittest.IsolatedAsyncioTestCase):
         mock_send.side_effect = self.side_effect_send_request
         
         # Run two switches concurrently in tasks
-        task1 = asyncio.create_task(self.loader.switch_model("qwen2.5-coder-1.5b-instruct"))
-        task2 = asyncio.create_task(self.loader.switch_model("qwen2-vl-2b-instruct"))
+        task1 = asyncio.create_task(self.loader.switch_model("gemma3:4b"))
+        task2 = asyncio.create_task(self.loader.switch_model("qwen3:4b"))
         
         results = await asyncio.gather(task1, task2)
             
-        self.assertEqual(results[0]["active_model"], "qwen2.5-coder:1.5b-instruct-q4_K_M")
-        self.assertEqual(results[1]["active_model"], "qwen2-vl:2b-instruct-q4_K_M")
-        self.assertIn("qwen2-vl:2b-instruct-q4_K_M", self.mock_vram)
+        self.assertEqual(results[0]["active_model"], "gemma3:4b")
+        self.assertEqual(results[1]["active_model"], "qwen3:4b")
+        self.assertIn("qwen3:4b", self.mock_vram)
         # Ensure only one model remains loaded
         self.assertEqual(len(self.mock_vram), 1)
 

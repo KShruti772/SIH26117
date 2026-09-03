@@ -31,6 +31,26 @@ class TestSubprocessSandbox(unittest.TestCase):
         self.assertFalse(res["timed_out"])
         self.assertIsNone(res["error"])
 
+    def test_basic_calculation_output_and_metadata(self):
+        """Verify exact calculation code output, exit code 0, timing, and metadata dictionary."""
+        code = (
+            "print('=== Basic Aegis Sandbox Test ===')\n"
+            "x = 10\n"
+            "y = 20\n"
+            "print(f'Sum Calculation: {x + y}')\n"
+        )
+        res = self.sandbox.execute(code)
+        self.assertTrue(res["success"])
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["exit_code"], 0)
+        self.assertIn("=== Basic Aegis Sandbox Test ===", res["stdout"])
+        self.assertIn("Sum Calculation: 30", res["stdout"])
+        self.assertEqual(res["stderr"], "")
+        self.assertGreaterEqual(res["duration_ms"], 0)
+        self.assertIn("code_hash", res)
+        self.assertIn("execution_id", res)
+        self.assertIn("timestamp", res)
+
     def test_python_exception(self):
         """2, 6. Verify raised python exceptions are captured in stderr."""
         code = "raise ValueError('Custom test error')"

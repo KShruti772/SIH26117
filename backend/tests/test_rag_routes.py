@@ -1,9 +1,13 @@
 import unittest
+import os
+import tempfile
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 from io import BytesIO
 from backend.app.main import app
 from backend.security.dependencies import get_current_user
+from backend.app.config.settings import settings
+from backend.security.database import init_db
 
 # Mock user object matching sqlite Row interface/dict
 class MockUser:
@@ -18,6 +22,20 @@ class MockUser:
 
 class TestRagRoutes(unittest.TestCase):
     """Unit tests verifying FastAPI `/documents` routes: validations, auth, and traversal guards."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.original_db_path = settings.AUTH_DB_PATH
+        cls.test_dir = tempfile.mkdtemp()
+        settings.AUTH_DB_PATH = os.path.join(cls.test_dir, "audit.db")
+        init_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        settings.AUTH_DB_PATH = cls.original_db_path
+        for filename in os.listdir(cls.test_dir):
+            os.remove(os.path.join(cls.test_dir, filename))
+        os.rmdir(cls.test_dir)
 
     def setUp(self):
         self.client = TestClient(app)
@@ -111,7 +129,8 @@ class TestRagRoutes(unittest.TestCase):
                 "filename": "manual.pdf",
                 "source_path": "/absolute/server/path/manual.pdf",
                 "ingested_at": 1690000000,
-                "owner_id": 1
+                "owner_id": 1,
+                "chunk_count": 4
             }
         ]
         
@@ -122,8 +141,29 @@ class TestRagRoutes(unittest.TestCase):
         self.assertEqual(data[0]["id"], "doc-id-abc")
         self.assertEqual(data[0]["filename"], "manual.pdf")
         self.assertEqual(data[0]["status"], "indexed")
+        self.assertEqual(data[0]["chunk_count"], 4)
         # Ensure source absolute path is completely concealed
         self.assertNotIn("source_path", data[0])
+
+    @patch("backend.app.main.rag_service")
+    def test_list_documents_excludes_mock_records(self, mock_rag):
+        """Mock vector metadata must not appear in the application document list."""
+        app.dependency_overrides[get_current_user] = lambda: self.mock_user
+        mock_rag.list_documents.return_value = [
+            {
+                "document_id": "mock-doc",
+                "filename": "fixture.txt",
+                "source_path": "/safe/fixture.txt",
+                "ingested_at": 1690000000,
+                "owner_id": 1,
+                "is_mock": True,
+            }
+        ]
+
+        response = self.client.get("/documents")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
 
     @patch("backend.app.main.rag_service")
     @patch("os.path.exists")

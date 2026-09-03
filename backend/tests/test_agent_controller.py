@@ -1,12 +1,30 @@
 import unittest
+import os
+import tempfile
 from unittest.mock import MagicMock, patch
 import logging
 from backend.models.registry.manager import ModelRegistryManager
 from backend.models.loaders.manager import ModelLoaderManager
 from backend.agents.controller.agent import AgentController, AgentStep, AgentPlan
+from backend.app.config.settings import settings
+from backend.security.database import init_db
 
 class TestAgentController(unittest.IsolatedAsyncioTestCase):
     """Unit tests for the AEGIS Multi-Step Agent Planner and Controller orchestration loop."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.original_db_path = settings.AUTH_DB_PATH
+        cls.test_dir = tempfile.mkdtemp()
+        settings.AUTH_DB_PATH = os.path.join(cls.test_dir, "audit.db")
+        init_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        settings.AUTH_DB_PATH = cls.original_db_path
+        for filename in os.listdir(cls.test_dir):
+            os.remove(os.path.join(cls.test_dir, filename))
+        os.rmdir(cls.test_dir)
     
     async def asyncSetUp(self):
         self.registry_path = "backend/models/registry/registry.json"
@@ -16,6 +34,7 @@ class TestAgentController(unittest.IsolatedAsyncioTestCase):
         self.mock_loader = MagicMock(spec=ModelLoaderManager)
         self.mock_loader.base_url = "http://localhost:11434"
         self.mock_loader.switch_model.return_value = {"status": "success"}
+        self.mock_loader.generate.return_value = "print(42)"
 
         # Mock tools
         self.mock_sandbox = MagicMock()
@@ -59,7 +78,7 @@ class TestAgentController(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res["success"])
         self.assertEqual(res["plan"]["status"], "COMPLETED")
         self.assertEqual(self.mock_sandbox.execute.call_count, 1)
-        self.mock_loader.switch_model.assert_any_call("qwen2.5-coder-1.5b-instruct")
+        self.mock_loader.switch_model.assert_any_call("gemma3:4b")
 
     async def test_verification_callback_fail_triggers_replan(self):
         """Verify step verification failures trigger dynamic replan retry steps."""

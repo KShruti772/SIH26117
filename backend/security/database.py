@@ -76,14 +76,34 @@ def init_db() -> None:
                 user_id INTEGER,
                 username TEXT,
                 title TEXT NOT NULL,
+                feature TEXT DEFAULT 'chat',
+                status TEXT DEFAULT 'active',
                 created_at TEXT DEFAULT (datetime('now', 'utc')),
-                updated_at TEXT DEFAULT (datetime('now', 'utc'))
+                updated_at TEXT DEFAULT (datetime('now', 'utc')),
+                last_message_at TEXT DEFAULT (datetime('now', 'utc'))
             )
         """)
+        for col, col_type in [
+            ("user_id", "INTEGER"),
+            ("username", "TEXT"),
+            ("feature", "TEXT DEFAULT 'chat'"),
+            ("status", "TEXT DEFAULT 'active'"),
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT"),
+            ("last_message_at", "TEXT")
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE conversations ADD COLUMN {col} {col_type}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
+                user_id INTEGER,
+                username TEXT,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 timestamp TEXT DEFAULT (datetime('now', 'utc')),
@@ -94,9 +114,142 @@ def init_db() -> None:
                 request_id TEXT,
                 verification TEXT,
                 error_detail TEXT,
+                feature TEXT DEFAULT 'chat',
+                metadata_json TEXT,
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             )
         """)
+        for col, col_type in [
+            ("user_id", "INTEGER"),
+            ("username", "TEXT"),
+            ("rag_used", "INTEGER DEFAULT 0"),
+            ("sources_json", "TEXT"),
+            ("model_id", "TEXT"),
+            ("duration_ms", "INTEGER"),
+            ("request_id", "TEXT"),
+            ("verification", "TEXT"),
+            ("error_detail", "TEXT"),
+            ("feature", "TEXT DEFAULT 'chat'"),
+            ("metadata_json", "TEXT")
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE messages ADD COLUMN {col} {col_type}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                content_hash TEXT UNIQUE NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                mime_type TEXT DEFAULT 'application/octet-stream',
+                document_type TEXT DEFAULT 'document',
+                category TEXT DEFAULT 'document',
+                extraction_method TEXT DEFAULT 'native',
+                metadata_json TEXT DEFAULT '{}',
+                chunk_count INTEGER DEFAULT 0,
+                owner_id INTEGER DEFAULT -1,
+                owner_username TEXT DEFAULT '',
+                status TEXT DEFAULT 'indexed',
+                created_at TEXT DEFAULT (datetime('now', 'utc')),
+                updated_at TEXT DEFAULT (datetime('now', 'utc'))
+            )
+        """)
+        for col, col_type in [
+            ("file_size", "INTEGER DEFAULT 0"),
+            ("mime_type", "TEXT DEFAULT 'application/octet-stream'"),
+            ("document_type", "TEXT DEFAULT 'document'"),
+            ("category", "TEXT DEFAULT 'document'"),
+            ("extraction_method", "TEXT DEFAULT 'native'"),
+            ("metadata_json", "TEXT DEFAULT '{}'"),
+            ("chunk_count", "INTEGER DEFAULT 0"),
+            ("owner_id", "INTEGER DEFAULT -1"),
+            ("owner_username", "TEXT DEFAULT ''"),
+            ("status", "TEXT DEFAULT 'indexed'"),
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT")
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE documents ADD COLUMN {col} {col_type}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS generated_documents (
+                id TEXT PRIMARY KEY,
+                owner_id INTEGER DEFAULT -1,
+                owner_username TEXT DEFAULT '',
+                filename TEXT NOT NULL,
+                title TEXT NOT NULL,
+                format TEXT DEFAULT 'pdf',
+                file_size INTEGER DEFAULT 0,
+                mime_type TEXT DEFAULT 'application/pdf',
+                source_document_ids TEXT DEFAULT '',
+                conversation_id TEXT DEFAULT '',
+                status TEXT DEFAULT 'completed',
+                file_path TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now', 'utc')),
+                updated_at TEXT DEFAULT (datetime('now', 'utc'))
+            )
+        """)
+        for col, col_type in [
+            ("owner_id", "INTEGER DEFAULT -1"),
+            ("owner_username", "TEXT DEFAULT ''"),
+            ("filename", "TEXT"),
+            ("title", "TEXT"),
+            ("format", "TEXT DEFAULT 'pdf'"),
+            ("file_size", "INTEGER DEFAULT 0"),
+            ("mime_type", "TEXT DEFAULT 'application/pdf'"),
+            ("source_document_ids", "TEXT DEFAULT ''"),
+            ("conversation_id", "TEXT DEFAULT ''"),
+            ("status", "TEXT DEFAULT 'completed'"),
+            ("file_path", "TEXT"),
+            ("created_at", "TEXT"),
+            ("updated_at", "TEXT")
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE generated_documents ADD COLUMN {col} {col_type}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sandbox_artifacts (
+                id TEXT PRIMARY KEY,
+                execution_id TEXT NOT NULL,
+                user_id INTEGER DEFAULT -1,
+                username TEXT DEFAULT '',
+                conversation_id TEXT DEFAULT '',
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                mime_type TEXT DEFAULT 'application/octet-stream',
+                content_hash TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now', 'utc'))
+            )
+        """)
+        for col, col_type in [
+            ("execution_id", "TEXT NOT NULL"),
+            ("user_id", "INTEGER DEFAULT -1"),
+            ("username", "TEXT DEFAULT ''"),
+            ("conversation_id", "TEXT DEFAULT ''"),
+            ("filename", "TEXT NOT NULL"),
+            ("file_path", "TEXT NOT NULL"),
+            ("file_size", "INTEGER DEFAULT 0"),
+            ("mime_type", "TEXT DEFAULT 'application/octet-stream'"),
+            ("content_hash", "TEXT DEFAULT ''"),
+            ("created_at", "TEXT")
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE sandbox_artifacts ADD COLUMN {col} {col_type}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
         conn.commit()
     finally:
         conn.close()

@@ -3,17 +3,17 @@
 import React from "react";
 import { Avatar, Badge, Button, Divider, Menu, Tag, Typography } from "antd";
 import type { MenuProps } from "antd";
-import { AppstoreOutlined, AuditOutlined, CloudServerOutlined, CodeOutlined, DatabaseOutlined, FileTextOutlined, InfoCircleOutlined, LogoutOutlined, RobotOutlined, SafetyCertificateOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons";
+import { AppstoreOutlined, AuditOutlined, CloudServerOutlined, CodeOutlined, DatabaseOutlined, FileTextOutlined, HistoryOutlined, InfoCircleOutlined, LogoutOutlined, RobotOutlined, SafetyCertificateOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons";
 import { useAuth } from "../providers/AuthProvider";
 
-export type TabId = "dashboard" | "chat" | "rag" | "documents" | "models" | "sandbox" | "audit" | "access" | "settings" | "about";
+export type TabId = "dashboard" | "chat" | "rag" | "documents" | "models" | "sandbox" | "history" | "audit" | "access" | "settings" | "about";
 interface SidebarProps { activeTab: TabId; setActiveTab: (tab: TabId) => void; isMobileDrawer?: boolean; }
 
 export default function Sidebar({ activeTab, setActiveTab, isMobileDrawer = false }: SidebarProps) {
   const { user, logout } = useAuth();
   const isAdmin = user?.role === "admin";
   const items: MenuProps["items"] = [
-    { type: "group", label: "WORKSPACE", children: [{ key: "dashboard", icon: <AppstoreOutlined />, label: "Dashboard" }, { key: "chat", icon: <RobotOutlined />, label: "AI Assistant" }] },
+    { type: "group", label: "WORKSPACE", children: [{ key: "dashboard", icon: <AppstoreOutlined />, label: "Dashboard" }, { key: "chat", icon: <RobotOutlined />, label: "AI Assistant" }, { key: "history", icon: <HistoryOutlined />, label: "Workspace History" }] },
     { type: "group", label: "KNOWLEDGE", children: [{ key: "documents", icon: <FileTextOutlined />, label: "Documents" }, { key: "rag", icon: <DatabaseOutlined />, label: "Knowledge Base" }] },
     { type: "group", label: "AI RUNTIME", children: [{ key: "models", icon: <CloudServerOutlined />, label: "Models" }, { key: "sandbox", icon: <CodeOutlined />, label: "Sandbox" }] },
     ...(isAdmin ? [{ type: "group" as const, label: "SECURITY", children: [{ key: "access", icon: <TeamOutlined />, label: "User Management" }, { key: "audit", icon: <AuditOutlined />, label: "Audit Ledger" }] }] : []),

@@ -66,7 +66,7 @@ class TestModelManagement(unittest.TestCase):
                 return {}
 
             self.loader_manager._send_request = mock_send_request
-            self.loader_manager.current_model_id = "gemma3:4b"
+            self.loader_manager.get_current_model_id = AsyncMock(return_value="gemma3:4b")
 
             discovered = await self.loader_manager.get_discovered_models()
             self.assertEqual(len(discovered), 2)

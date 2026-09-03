@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 import unittest
 import sqlite3
 import jwt
@@ -8,11 +10,12 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 from backend.app.main import app
 from backend.app.config.settings import settings
-from backend.security.database import get_db
+from backend.security.database import get_db, init_db
 from backend.security.auth import create_access_token, hash_password
 from backend.security.dependencies import RoleChecker
 
-TEST_DB_PATH = "data/private/aegis_auth_test.db"
+TEST_TEMP_DIR = tempfile.mkdtemp(prefix="aegis_auth_test_")
+TEST_DB_PATH = os.path.join(TEST_TEMP_DIR, "aegis_auth_test.db")
 
 def get_test_db():
     """FastAPI dependency override yielding a test connection to the temporary database."""
@@ -28,9 +31,12 @@ class TestAegisAuth(unittest.TestCase):
     
     @classmethod
     def setUpClass(cls):
+        cls.original_db_path = settings.AUTH_DB_PATH
+        settings.AUTH_DB_PATH = TEST_DB_PATH
         # Ensure private folder exists
         os.makedirs(os.path.dirname(TEST_DB_PATH), exist_ok=True)
         # Setup clean schema
+        init_db()
         conn = sqlite3.connect(TEST_DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
@@ -40,6 +46,7 @@ class TestAegisAuth(unittest.TestCase):
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL,
                 is_active INTEGER DEFAULT 1,
+                must_change_password INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now', 'utc'))
             )
         """)
@@ -54,11 +61,8 @@ class TestAegisAuth(unittest.TestCase):
     def tearDownClass(cls):
         # Clear overrides and remove temp test DB
         app.dependency_overrides.clear()
-        if os.path.exists(TEST_DB_PATH):
-            try:
-                os.remove(TEST_DB_PATH)
-            except Exception:
-                pass
+        settings.AUTH_DB_PATH = cls.original_db_path
+        shutil.rmtree(TEST_TEMP_DIR, ignore_errors=True)
 
     def setUp(self):
         # Clear users table before every test case to keep isolation

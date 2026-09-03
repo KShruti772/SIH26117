@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 import sqlite3
 import unittest
 
@@ -10,7 +12,8 @@ seed_module = importlib.import_module("scripts.seed-users")
 seed_demo_users = seed_module.seed_demo_users
 DEMO_ACCOUNTS = seed_module.DEMO_ACCOUNTS
 
-TEST_SEED_DB_PATH = "data/private/aegis_seed_test.db"
+TEST_TEMP_DIR = tempfile.mkdtemp(prefix="aegis_seed_test_")
+TEST_SEED_DB_PATH = os.path.join(TEST_TEMP_DIR, "aegis_seed_test.db")
 
 class TestSeedUsers(unittest.TestCase):
     """Unit test verification suite for persistent demo user account seeding."""
@@ -23,11 +26,7 @@ class TestSeedUsers(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         settings.AUTH_DB_PATH = cls.original_db_path
-        if os.path.exists(TEST_SEED_DB_PATH):
-            try:
-                os.remove(TEST_SEED_DB_PATH)
-            except Exception:
-                pass
+        shutil.rmtree(TEST_TEMP_DIR, ignore_errors=True)
 
     def setUp(self):
         from backend.security.database import init_db

@@ -3,9 +3,12 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 import os
 import json
+import tempfile
 from backend.app.main import app
 from backend.security.dependencies import get_current_user
 from backend.rag.pipeline import AegisRagService
+from backend.app.config.settings import settings
+from backend.security.database import init_db
 
 # Mock user object matching sqlite Row interface/dict
 class MockUser:
@@ -20,6 +23,20 @@ class MockUser:
 
 class TestRagSecurity(unittest.TestCase):
     """Thorough multi-tenant security verification tests for RAG information boundaries."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.original_db_path = settings.AUTH_DB_PATH
+        cls.test_dir = tempfile.mkdtemp()
+        settings.AUTH_DB_PATH = os.path.join(cls.test_dir, "audit.db")
+        init_db()
+
+    @classmethod
+    def tearDownClass(cls):
+        settings.AUTH_DB_PATH = cls.original_db_path
+        for filename in os.listdir(cls.test_dir):
+            os.remove(os.path.join(cls.test_dir, filename))
+        os.rmdir(cls.test_dir)
 
     def setUp(self):
         self.client = TestClient(app)

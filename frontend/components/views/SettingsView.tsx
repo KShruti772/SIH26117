@@ -6,13 +6,125 @@ import { DatabaseOutlined, LockOutlined, SafetyCertificateOutlined, SettingOutli
 interface SettingsViewProps {
   passwordForm: { old_password: string; new_password: string; confirm_password: string };
   setPasswordForm: (value: { old_password: string; new_password: string; confirm_password: string }) => void;
-  onSubmit: (event: React.FormEvent) => void;
+  onSubmit: (event?: React.FormEvent | Record<string, unknown>) => void;
   loading: boolean;
   success: string | null;
   error: string | null;
 }
+
 export default function SettingsView(props: SettingsViewProps) {
-  const update = (key: keyof SettingsViewProps["passwordForm"], value: string) => props.setPasswordForm({ ...props.passwordForm, [key]: value });
-  const policies = ["Local inference only", "Audit authentication events", "Audit model operations", "Audit RAG operations", "Sandbox isolation"];
-  return <div className="aegis-view-stack"><section className="aegis-view-heading"><div><Typography.Title level={2}>System settings</Typography.Title><Typography.Paragraph>Review local-node security settings, runtime information, and your account credentials.</Typography.Paragraph></div><Tag color="success">POLICIES ENFORCED</Tag></section><Row gutter={[16, 16]}><Col xs={24} xl={12}><Card title={<><LockOutlined /> Account security</>} className="aegis-panel-card"><form onSubmit={props.onSubmit}><Form layout="vertical" requiredMark={false}><Form.Item label="Current password"><Input.Password value={props.passwordForm.old_password} onChange={(event) => update("old_password", event.target.value)} autoComplete="current-password" /></Form.Item><Form.Item label="New password"><Input.Password value={props.passwordForm.new_password} onChange={(event) => update("new_password", event.target.value)} autoComplete="new-password" /></Form.Item><Form.Item label="Confirm new password"><Input.Password value={props.passwordForm.confirm_password} onChange={(event) => update("confirm_password", event.target.value)} autoComplete="new-password" /></Form.Item><Button htmlType="submit" type="primary" loading={props.loading} disabled={!props.passwordForm.old_password || !props.passwordForm.new_password}>Update password</Button></Form></form>{props.success && <Alert className="mt-4" type="success" showIcon message={props.success} />}{props.error && <Alert className="mt-4" type="error" showIcon message="Password update failed" description={props.error} />}</Card></Col><Col xs={24} xl={12}><Card title={<><SettingOutlined /> Local node configuration</>} className="aegis-panel-card"><Descriptions column={1} size="small" items={[{ key: "api", label: "API endpoint", children: "http://127.0.0.1:8000" }, { key: "vector", label: "Vector database", children: "ChromaDB · data/chroma_db" }, { key: "audit", label: "Audit ledger", children: "SQLite append-only" }, { key: "runtime", label: "Model runtime", children: "Ollama Engine · port 11434" }]} /></Card></Col><Col span={24}><Card title={<><SafetyCertificateOutlined /> Security policies</>} className="aegis-panel-card"><div className="grid gap-3">{policies.map((policy) => <div key={policy} className="flex items-center justify-between gap-4 rounded-lg border border-slate-800 p-4"><div><Typography.Text strong>{policy}</Typography.Text><div className="mt-1 text-xs text-slate-400">Enforced by the local AEGIS service.</div></div><Switch checked disabled checkedChildren="ON" unCheckedChildren="OFF" /></div>)}</div></Card></Col><Col span={24}><Card title={<><DatabaseOutlined /> Data residency</>} className="aegis-panel-card"><Typography.Paragraph className="!mb-0">Inference, documents, embeddings, audit data, and sandbox activity are processed locally. The interface does not change or bypass the underlying security controls.</Typography.Paragraph></Card></Col></Row></div>;
+  const update = (key: keyof SettingsViewProps["passwordForm"], value: string) =>
+    props.setPasswordForm({ ...props.passwordForm, [key]: value });
+
+  const policies = [
+    "Local inference only",
+    "Audit authentication events",
+    "Audit model operations",
+    "Audit RAG operations",
+    "Sandbox isolation"
+  ];
+
+  return (
+    <div className="aegis-view-stack">
+      <section className="aegis-view-heading">
+        <div>
+          <Typography.Title level={2}>System settings</Typography.Title>
+          <Typography.Paragraph>
+            Review local-node security settings, runtime information, and your account credentials.
+          </Typography.Paragraph>
+        </div>
+        <Tag color="success">POLICIES ENFORCED</Tag>
+      </section>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xl={12}>
+          <Card title={<><LockOutlined /> Account security</>} className="aegis-panel-card">
+            <Form layout="vertical" requiredMark={false} onFinish={props.onSubmit}>
+              <Form.Item label="Current password">
+                <Input.Password
+                  value={props.passwordForm.old_password}
+                  onChange={(event) => update("old_password", event.target.value)}
+                  autoComplete="current-password"
+                />
+              </Form.Item>
+              <Form.Item label="New password">
+                <Input.Password
+                  value={props.passwordForm.new_password}
+                  onChange={(event) => update("new_password", event.target.value)}
+                  autoComplete="new-password"
+                />
+              </Form.Item>
+              <Form.Item label="Confirm new password">
+                <Input.Password
+                  value={props.passwordForm.confirm_password}
+                  onChange={(event) => update("confirm_password", event.target.value)}
+                  autoComplete="new-password"
+                />
+              </Form.Item>
+              <Button
+                htmlType="submit"
+                type="primary"
+                loading={props.loading}
+                disabled={!props.passwordForm.old_password || !props.passwordForm.new_password}
+              >
+                Update password
+              </Button>
+            </Form>
+            {props.success && <Alert className="mt-4" type="success" showIcon title={props.success} />}
+            {props.error && (
+              <Alert
+                className="mt-4"
+                type="error"
+                showIcon
+                title="Password update failed"
+                description={props.error}
+              />
+            )}
+          </Card>
+        </Col>
+
+        <Col xs={24} xl={12}>
+          <Card title={<><SettingOutlined /> Local node configuration</>} className="aegis-panel-card">
+            <Descriptions
+              column={1}
+              size="small"
+              items={[
+                { key: "api", label: "API endpoint", children: "http://127.0.0.1:8000" },
+                { key: "vector", label: "Vector database", children: "ChromaDB · data/chroma_db" },
+                { key: "audit", label: "Audit ledger", children: "SQLite append-only" },
+                { key: "runtime", label: "Model runtime", children: "Ollama Engine · port 11434" }
+              ]}
+            />
+          </Card>
+        </Col>
+
+        <Col span={24}>
+          <Card title={<><SafetyCertificateOutlined /> Security policies</>} className="aegis-panel-card">
+            <div className="grid gap-3">
+              {policies.map((policy) => (
+                <div
+                  key={policy}
+                  className="flex items-center justify-between gap-4 rounded-lg border border-slate-800 p-4"
+                >
+                  <div>
+                    <Typography.Text strong>{policy}</Typography.Text>
+                    <div className="mt-1 text-xs text-slate-400">Enforced by the local AEGIS service.</div>
+                  </div>
+                  <Switch checked disabled checkedChildren="ON" unCheckedChildren="OFF" />
+                </div>
+              ))}
+            </div>
+          </Card>
+        </Col>
+
+        <Col span={24}>
+          <Card title={<><DatabaseOutlined /> Data residency</>} className="aegis-panel-card">
+            <Typography.Paragraph className="!mb-0">
+              Inference, documents, embeddings, audit data, and sandbox activity are processed locally. The interface does not change or bypass the underlying security controls.
+            </Typography.Paragraph>
+          </Card>
+        </Col>
+      </Row>
+    </div>
+  );
 }

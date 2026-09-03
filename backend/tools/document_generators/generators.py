@@ -31,11 +31,13 @@ class BaseDocumentGenerator:
         if not filename or filename.strip() in [".", ".."]:
             raise SafePathViolationError("Invalid or empty output filename.")
             
+        # Normalize Windows backslashes for uniform path resolution across OS platforms
+        normalized_filename = filename.replace("\\", "/")
         target_dir = os.path.join(self.output_base_dir, subfolder)
         os.makedirs(target_dir, exist_ok=True)
         
         # Resolve target path before testing containment
-        target_path = os.path.abspath(os.path.join(target_dir, filename))
+        target_path = os.path.abspath(os.path.join(target_dir, normalized_filename))
         
         # Security boundaries check: target file must lie strictly inside subfolder
         if not target_path.startswith(target_dir + os.sep) and target_path != target_dir:

@@ -15,6 +15,7 @@ export class ApiError extends Error {
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string>;
+  timeoutMs?: number;
 }
 
 let isRedirectingToLogin = false;
@@ -40,7 +41,7 @@ export function handleAuthExpiration(): void {
  * Core HTTP Request wrapper with JWT interception and status translation
  */
 export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { params, headers: customHeaders, body, ...init } = options;
+  const { params, headers: customHeaders, body, timeoutMs, ...init } = options;
 
   // 1. Build URL with query params if provided
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
@@ -71,9 +72,10 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     console.log(`[AEGIS API REQUEST] ${method} ${url} (Auth: ${maskedAuth})`);
   }
 
-  // 3. Set request timeout via AbortController
+  // 3. Set request timeout via AbortController (default 60s for local inference/embeddings)
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000);
+  const requestTimeout = timeoutMs ?? 60000;
+  const timeoutId = setTimeout(() => controller.abort(), requestTimeout);
 
   try {
     const response = await fetch(url, {
@@ -145,11 +147,22 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     if (error instanceof ApiError) {
       throw error;
     }
+    
+    // Check if error was caused by AbortController timeout
+    if (error instanceof Error && error.name === "AbortError") {
+      const timeoutSec = Math.round(requestTimeout / 1000);
+      const timeoutMsg = `Request timed out after ${timeoutSec} seconds while waiting for the AEGIS local backend.`;
+      if (process.env.NODE_ENV !== "production") {
+        console.error(`[AEGIS API TIMEOUT] ${method} ${url} exceeded timeout of ${timeoutSec}s`);
+      }
+      throw new ApiError(timeoutMsg, 504, { timedOut: true, timeoutSec, targetUrl: url });
+    }
+
     const failureReason = error instanceof Error ? error.message : String(error);
     if (process.env.NODE_ENV !== "production") {
       console.error(`[AEGIS API NETWORK FAILURE] ${method} ${url} failed to reach server. Reason: ${failureReason}`);
     }
-    // Convert network timeout/connection failures into safe text with underlying details
+    // Convert network connection failures into clean error with details
     throw new ApiError(
       `Unable to connect to the AEGIS backend at ${env.apiUrl}. Details: ${failureReason}`,
       503,

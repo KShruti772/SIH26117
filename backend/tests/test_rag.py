@@ -77,6 +77,14 @@ class TestAegisRagPipeline(unittest.TestCase):
 
     def setUp(self):
         # Refresh the database collection for clean test scopes
+        import uuid
+        from backend.app.config.settings import settings
+        from backend.security.database import init_db
+        self.orig_auth_db = settings.AUTH_DB_PATH
+        self.db_path = os.path.join(self.safe_dir_path, f"test_rag_{uuid.uuid4().hex[:8]}.db")
+        settings.AUTH_DB_PATH = self.db_path
+        init_db()
+
         self.embedding_model = MockEmbeddingModel()
         self.rag_service = AegisRagService(
             embedding_model=self.embedding_model,
@@ -86,9 +94,18 @@ class TestAegisRagPipeline(unittest.TestCase):
         
         # Clear collection elements if already exist
         if self.rag_service.collection.count() > 0:
-            doc_list = self.rag_service.list_documents()
-            for doc in doc_list:
-                self.rag_service.delete_document(doc["document_id"])
+            all_ids = self.rag_service.collection.get()["ids"]
+            if all_ids:
+                self.rag_service.collection.delete(ids=all_ids)
+
+    def tearDown(self):
+        from backend.app.config.settings import settings
+        settings.AUTH_DB_PATH = self.orig_auth_db
+        if hasattr(self, "db_path") and os.path.exists(self.db_path):
+            try:
+                os.remove(self.db_path)
+            except Exception:
+                pass
 
     def test_embedding_generation(self):
         """5. Verify the embedding model outputs expected dimensional vectors."""
@@ -118,6 +135,22 @@ class TestAegisRagPipeline(unittest.TestCase):
         results = self.rag_service.search("pressure limit PSI", top_k=1)
         self.assertEqual(len(results), 1)
         self.assertIn("PSI", results[0]["text"])
+
+    def test_logical_document_count_is_not_chunk_count(self):
+        """A single multi-chunk source is returned as one logical document."""
+        doc_id = self.rag_service.ingest_document(self.txt_file, chunk_size=40, chunk_overlap=5)
+        documents = self.rag_service.list_documents()
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0]["document_id"], doc_id)
+        self.assertGreater(documents[0]["chunk_count"], 1)
+
+    def test_two_documents_have_two_logical_records(self):
+        """Two distinct sources produce two logical document records."""
+        self.rag_service.ingest_document(self.txt_file)
+        self.rag_service.ingest_document(self.pdf_file)
+
+        self.assertEqual(len(self.rag_service.list_documents()), 2)
 
     def test_pdf_ingestion_and_retrieval(self):
         """2, 7. Verify PDF content parsing, indexing, and vector similarity search works."""
@@ -159,6 +192,7 @@ class TestAegisRagPipeline(unittest.TestCase):
     def test_empty_database(self):
         """8. Verify searching an empty database returns empty results safely."""
         # Database count is 0
+        self.assertEqual(self.rag_service.list_documents(), [])
         results = self.rag_service.search("pressure", top_k=3)
         self.assertEqual(results, [])
 
@@ -169,12 +203,34 @@ class TestAegisRagPipeline(unittest.TestCase):
             
         with self.assertRaises(InsufficientTextError):
             self.rag_service.ingest_document(self.scanned_pdf_file)
+        self.assertEqual(self.rag_service.list_documents(), [])
+
+    def test_deleted_document_is_removed_from_logical_count(self):
+        """Deleting a document removes all of its chunks and its logical record."""
+        doc_id = self.rag_service.ingest_document(self.txt_file)
+        self.assertEqual(len(self.rag_service.list_documents()), 1)
+
+        self.rag_service.delete_document(doc_id)
+
+        self.assertEqual(self.rag_service.list_documents(), [])
 
     def test_duplicate_ingestion(self):
         """10. Verify duplicate document indexing requests are blocked."""
         self.rag_service.ingest_document(self.txt_file)
         with self.assertRaises(DuplicateIngestionError):
             self.rag_service.ingest_document(self.txt_file)
+
+    def test_duplicate_content_in_different_paths_is_rejected(self):
+        """UUID-prefixed storage paths cannot bypass duplicate-content detection."""
+        duplicate_path = os.path.join(self.safe_dir_path, "same-content-renamed.txt")
+        shutil.copyfile(self.txt_file, duplicate_path)
+        try:
+            self.rag_service.ingest_document(self.txt_file)
+            with self.assertRaises(DuplicateIngestionError):
+                self.rag_service.ingest_document(duplicate_path)
+        finally:
+            if os.path.exists(duplicate_path):
+                os.remove(duplicate_path)
 
     def test_unsafe_path_traversal(self):
         """11. Verify path traversal escapes outside safe directories are blocked."""

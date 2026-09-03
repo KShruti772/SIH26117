@@ -13,6 +13,8 @@ export interface AuditLog {
   request_id: string | null;
   duration_ms: number | null;
   metadata_json: string | null;
+  previous_hash?: string | null;
+  entry_hash?: string | null;
 }
 
 export interface AuditQueryParams {

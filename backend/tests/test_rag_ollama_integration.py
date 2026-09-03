@@ -114,8 +114,8 @@ class TestRagOllamaIntegration(unittest.TestCase):
 
             res = await self.controller.run(query)
 
-            self.assertTrue(res["success"])  # Re-routed or returned fallback text
-            self.assertIn("Simulated text response", res["answer"])
+            self.assertFalse(res["success"])
+            self.assertIn("Local model generation failed", res["answer"])
 
         asyncio.run(run_test())
 

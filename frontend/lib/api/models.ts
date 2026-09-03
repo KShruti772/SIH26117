@@ -31,7 +31,7 @@ export interface ModelLoaderStatus {
 export interface ModelTestResult {
   status: "PASS" | "FAIL";
   model: string;
-  latency_ms: number;
+  latency_ms: number | null;
   response?: string;
   error?: string;
 }

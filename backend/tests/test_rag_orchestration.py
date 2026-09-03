@@ -74,7 +74,12 @@ class TestRagOrchestration(unittest.TestCase):
             
             success = await self.controller._execute_step(plan, step_2)
             self.assertTrue(success)
-            self.assertEqual(step_2.output, "No relevant organizational knowledge was found.")
+            self.assertTrue(
+                any(msg in step_2.output for msg in [
+                    "I could not find sufficient evidence",
+                    "No relevant organizational knowledge"
+                ])
+            )
 
         asyncio.run(run_test())
 

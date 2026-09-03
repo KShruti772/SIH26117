@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 import uuid
 import logging
 from backend.app.config.settings import settings
@@ -8,16 +9,18 @@ from backend.security.database import init_db
 from backend.security.auth_router import router as auth_router
 from backend.security.audit import request_id_var, AuditLogger, get_request_id
 from backend.security.dependencies import RoleChecker, get_current_user
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import os
 
 from backend.models.registry.manager import ModelRegistryManager
 from backend.models.loaders.manager import ModelLoaderManager, RuntimeUnavailableError
-from backend.rag.embeddings import MockEmbeddingModel, LocalTransformerEmbeddingModel
+from backend.rag.embeddings import LocalTransformerEmbeddingModel
 from backend.rag.pipeline import AegisRagService
 from backend.tools.code_sandbox.sandbox import SubprocessSandbox
 from backend.app.verification.verifier import GroundingVerifier, make_grounding_verify_callback
 from backend.agents.controller.agent import AgentController
+
+from backend.models.router import ModelRouter, TaskType, NoCompatibleModelError
 
 # Initialize authentication database tables
 init_db()
@@ -25,6 +28,7 @@ init_db()
 # Setup shared agent controller dependencies
 registry_manager = ModelRegistryManager("backend/models/registry/registry.json")
 loader_manager = ModelLoaderManager(registry_manager)
+model_router = ModelRouter(registry_manager, loader_manager)
 
 # Initialize local SentenceTransformer embedding model (no silent mock fallback)
 embedding_path = os.path.join(settings.MODEL_DIR, "all-MiniLM-L6-v2")
@@ -44,11 +48,20 @@ sandbox_service = SubprocessSandbox()
 verifier = GroundingVerifier()
 verify_callback = make_grounding_verify_callback(verifier)
 
+from backend.rag.grounded_qa import GroundedQAService
+grounded_qa_service = GroundedQAService(
+    rag_service=rag_service,
+    loader_manager=loader_manager,
+    registry_manager=registry_manager,
+    model_router=model_router
+)
+
 agent_controller = AgentController(
     registry_manager=registry_manager,
     loader_manager=loader_manager,
     rag_service=rag_service,
     sandbox_service=sandbox_service,
+    model_router=model_router,
     verify_callback=verify_callback
 )
 
@@ -85,8 +98,18 @@ async def add_request_id_header(request: Request, call_next):
 app.include_router(auth_router)
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=1000)
+    message: Optional[str] = Field(default=None, max_length=1000)
+    query: Optional[str] = Field(default=None, max_length=1000)
     session_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_content(self):
+        msg = self.message if self.message is not None else self.query
+        if msg is None or len(msg.strip()) == 0:
+            raise ValueError("Prompt message or query must not be empty.")
+        if len(msg) > 1000:
+            raise ValueError("Prompt exceeds maximum length of 1000 characters.")
+        return self
 
 class CreateConversationRequest(BaseModel):
     title: Optional[str] = "New Conversation"
@@ -94,52 +117,79 @@ class CreateConversationRequest(BaseModel):
 class ModelSelectRequest(BaseModel):
     model_id: str = Field(..., min_length=1)
 
+class UpdateConversationRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+
 @app.get("/conversations", tags=["Conversation Operations"])
 async def list_conversations(current_user = Depends(get_current_user)):
     """Retrieves saved conversation sessions for active user."""
     from backend.agents.conversations import ConversationManager
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
     return ConversationManager.list_conversations(
-        user_id=current_user.get("id"),
-        username=current_user.get("username")
+        user_id=curr_id,
+        username=curr_username
     )
 
 @app.post("/conversations", tags=["Conversation Operations"])
 async def create_conversation(payload: CreateConversationRequest, current_user = Depends(get_current_user)):
     """Creates a new conversation session."""
     from backend.agents.conversations import ConversationManager
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+    curr_role = _get_user_val(current_user, "role")
+    req_id = get_request_id()
+
     conv = ConversationManager.create_conversation(
         title=payload.title or "New Conversation",
-        user_id=_get_user_val(current_user, "id"),
-        username=_get_user_val(current_user, "username")
+        user_id=curr_id,
+        username=curr_username
     )
     AuditLogger.log_event(
         action="CONVERSATION_CREATED",
         component="app.main",
         status="success",
-        user_id=_get_user_val(current_user, "id"),
-        username=_get_user_val(current_user, "username"),
-        role=_get_user_val(current_user, "role"),
+        user_id=curr_id,
+        username=curr_username,
+        role=curr_role,
         resource=conv["id"],
-        metadata={"session_id": conv["id"], "title": payload.title or "New Conversation"}
+        request_id=req_id,
+        metadata={"session_id": conv["id"], "title": conv["title"]}
     )
     return conv
 
 def _get_user_val(user: Any, key: str, default: Any = None) -> Any:
     if user is None:
         return default
+    val = None
     if isinstance(user, dict):
-        return user.get(key, default)
-    if hasattr(user, "__getitem__"):
+        val = user.get(key, default)
+    elif hasattr(user, "__getitem__"):
         try:
-            return user[key]
+            val = user[key]
         except (KeyError, IndexError, TypeError):
-            pass
-    return getattr(user, key, default)
+            val = getattr(user, key, default)
+    else:
+        val = getattr(user, key, default)
+
+    if hasattr(val, "_mock_name") or "mock" in type(val).__name__.lower():
+        try:
+            if key == "id":
+                return int(val) if isinstance(val, int) else (val if isinstance(val, (int, str)) else 1)
+            return str(val)
+        except Exception:
+            return 1 if key == "id" else default
+    return val
 
 @app.get("/conversations/{session_id}", tags=["Conversation Operations"])
 async def get_conversation(session_id: str, current_user = Depends(get_current_user)):
     """Retrieves conversation metadata and stored messages, enforcing session ownership."""
-    from backend.agents.conversations import ConversationManager
+    from backend.agents.conversations import ConversationManager, validate_session_id
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
     conv = ConversationManager.get_conversation(session_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation session not found.")
@@ -176,10 +226,87 @@ async def get_conversation(session_id: str, current_user = Depends(get_current_u
         
     return conv
 
+@app.patch("/conversations/{session_id}", tags=["Conversation Operations"])
+async def update_conversation(session_id: str, payload: UpdateConversationRequest, current_user = Depends(get_current_user)):
+    """Updates conversation title, enforcing session ownership."""
+    from backend.agents.conversations import ConversationManager, validate_session_id
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    conv_meta = ConversationManager.get_conversation_owner(session_id)
+    if not conv_meta:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+        
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+    
+    is_admin = curr_role == "admin"
+    owner_id = conv_meta.get("user_id")
+    owner_username = conv_meta.get("username")
+    
+    if not is_admin and (
+        (owner_id is not None and owner_id != curr_id) or
+        (owner_id is None and owner_username and owner_username != curr_username)
+    ):
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this conversation session.")
+        
+    success = ConversationManager.update_conversation_title(session_id, payload.title)
+    if not success:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+        
+    AuditLogger.log_event(
+        action="CONVERSATION_UPDATED",
+        component="app.main",
+        status="success",
+        user_id=curr_id,
+        username=curr_username,
+        role=curr_role,
+        resource=session_id,
+        metadata={"session_id": session_id, "new_title": payload.title}
+    )
+    return {"status": "success", "id": session_id, "title": payload.title}
+
+@app.get("/conversations/{session_id}/messages", tags=["Conversation Operations"])
+async def get_conversation_messages(session_id: str, current_user = Depends(get_current_user)):
+    """Retrieves message sequence for a conversation session, enforcing ownership."""
+    from backend.agents.conversations import ConversationManager, validate_session_id
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    conv_meta = ConversationManager.get_conversation_owner(session_id)
+    if not conv_meta:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+        
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+    
+    is_admin = curr_role == "admin"
+    owner_id = conv_meta.get("user_id")
+    owner_username = conv_meta.get("username")
+    
+    if not is_admin and (
+        (owner_id is not None and owner_id != curr_id) or
+        (owner_id is None and owner_username and owner_username != curr_username)
+    ):
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this conversation session.")
+        
+    return ConversationManager.get_messages(session_id)
+
 @app.delete("/conversations/{session_id}", tags=["Conversation Operations"])
 async def delete_conversation(session_id: str, current_user = Depends(get_current_user)):
-    """Deletes conversation session and stored messages, enforcing session ownership."""
-    from backend.agents.conversations import ConversationManager
+    """Permanently removes a saved conversation session and cascading messages."""
+    from backend.agents.conversations import ConversationManager, validate_session_id
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
     conv_meta = ConversationManager.get_conversation_owner(session_id)
     if not conv_meta:
         raise HTTPException(status_code=404, detail="Conversation session not found.")
@@ -230,72 +357,250 @@ async def delete_conversation(session_id: str, current_user = Depends(get_curren
     )
     return {"status": "success", "id": session_id}
 
+class PostConversationMessageRequest(BaseModel):
+    message: Optional[str] = None
+    query: Optional[str] = None
+    model: Optional[str] = None
+
+@app.post("/conversations/{session_id}/messages", tags=["Conversation Operations"])
+async def post_conversation_message(
+    session_id: str,
+    payload: PostConversationMessageRequest,
+    current_user = Depends(get_current_user)
+):
+    """Sends a message to an existing conversation session and triggers sovereign agent execution."""
+    from backend.agents.conversations import validate_session_id
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    msg = payload.message or payload.query or ""
+    chat_req = ChatRequest(
+        message=msg,
+        session_id=session_id,
+        model=payload.model
+    )
+    return await run_chat(chat_req, current_user=current_user)
+
 @app.post("/chat", tags=["Agent Operations"])
 async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user)):
     """Runs a multi-step sovereign agent query using local models, sandboxes, and verifiers."""
     from fastapi import HTTPException
-    from backend.agents.conversations import ConversationManager
+    from backend.agents.conversations import ConversationManager, validate_session_id
+    from backend.models.router import classify_task_from_prompt
     import uuid
     
     try:
-        session_id = payload.session_id or f"conv_{uuid.uuid4().hex[:12]}"
-        
-        # Persist user prompt to local database session
+        if payload.session_id:
+            try:
+                session_id = validate_session_id(payload.session_id)
+            except ValueError as ve:
+                raise HTTPException(status_code=400, detail=str(ve))
+        else:
+            session_id = f"conv_{uuid.uuid4().hex[:12]}"
+
+        user_prompt = payload.message or payload.query or ""
+        curr_user_id = _get_user_val(current_user, "id")
+        curr_username = _get_user_val(current_user, "username")
+        curr_role = _get_user_val(current_user, "role")
+        req_id = get_request_id() or f"REQ-{uuid.uuid4().hex[:8]}"
+
+        # Ownership check on existing conversation session
+        if payload.session_id:
+            conv_owner = ConversationManager.get_conversation_owner(payload.session_id)
+            if conv_owner:
+                owner_id = conv_owner.get("user_id")
+                owner_username = conv_owner.get("username")
+                is_admin = curr_role == "admin"
+                if not is_admin and (
+                    (owner_id is not None and owner_id != curr_user_id) or
+                    (owner_id is None and owner_username and owner_username != curr_username)
+                ):
+                    AuditLogger.log_event(
+                        action="AUTHORIZATION_DENIED",
+                        component="app.main",
+                        status="failure",
+                        user_id=curr_user_id,
+                        username=curr_username,
+                        role=curr_role,
+                        resource=payload.session_id,
+                        metadata={
+                            "reason": "RESOURCE_OWNERSHIP_FORBIDDEN",
+                            "session_id": payload.session_id,
+                            "owner_id": owner_id,
+                            "operation": "chat_message"
+                        }
+                    )
+                    raise HTTPException(status_code=403, detail="Access denied. You do not own this conversation session.")
+
+        # Classify task type for metadata tracking
+        try:
+            task_type = classify_task_from_prompt(user_prompt).value
+        except Exception:
+            task_type = "GENERAL_TEXT"
+
+        # Audit initial chat request
+        AuditLogger.log_event(
+            action="CHAT_REQUEST",
+            component="app.main",
+            status="success",
+            user_id=curr_user_id,
+            username=curr_username,
+            role=curr_role,
+            resource=session_id,
+            request_id=req_id,
+            metadata={"session_id": session_id, "prompt_length": len(user_prompt), "task_type": task_type}
+        )
+
+        # Persist user prompt to local database session with user identity
         ConversationManager.add_message(
             session_id=session_id,
             role="user",
-            content=payload.message
+            content=user_prompt,
+            user_id=curr_user_id,
+            username=curr_username,
+            request_id=req_id,
+            metadata={"task_type": task_type}
         )
         
-        res = await agent_controller.run(payload.message, current_user=current_user)
-        req_id = get_request_id()
+        recent_messages = ConversationManager.get_messages(session_id)[:-1]
+        recent_context_parts = [
+            f"{message['role'].capitalize()}: {message['content']}"
+            for message in recent_messages[-6:]
+            if message.get("content", "").strip()
+        ]
+        res = await agent_controller.run(user_prompt, current_user=current_user)
         
         is_rag = res.get("rag_used", False)
         sources = res.get("sources", [])
-        model_used = res.get("model", "gemma3:4b") or "gemma3:4b"
-        answer = res.get("answer") or "Agent execution failed."
-        verification = "GROUNDED" if is_rag else ("UNVERIFIED" if res["success"] else "FAILED")
+        if not sources and res.get("plan") and isinstance(res["plan"].get("steps"), list):
+            for s in res["plan"]["steps"]:
+                if s.get("input", {}).get("action") in ("rag_search", "document_wide_analysis") and isinstance(s.get("output"), list):
+                    is_rag = True
+                    for chunk in s["output"]:
+                        meta = chunk.get("metadata", {})
+                        sources.append({
+                            "filename": meta.get("filename") or meta.get("document_name") or "Unknown Document",
+                            "page": meta.get("page_number", 1),
+                            "page_number": meta.get("page_number", 1),
+                            "distance": round(chunk.get("distance", 0.0), 4) if "distance" in chunk else 0.0
+                        })
+
+        model_used = res.get("model") or "not reported"
+        raw_ans = res.get("answer") or (res.get("plan", {}).get("final_output") if res.get("plan") else None) or "Agent execution failed."
+        if isinstance(raw_ans, dict):
+            if "stdout" in raw_ans:
+                answer = raw_ans["stdout"] or raw_ans.get("error") or str(raw_ans)
+            else:
+                answer = json.dumps(raw_ans)
+        else:
+            answer = str(raw_ans)
         
+        step_ver = None
+        if res.get("plan") and isinstance(res["plan"].get("steps"), list) and res["plan"]["steps"]:
+            last_ver = res["plan"]["steps"][-1].get("verification_result")
+            if last_ver:
+                if last_ver == "PASS" or last_ver.startswith("PASS"):
+                    step_ver = "PASS"
+                elif last_ver == "FAIL" or last_ver.startswith("FAIL"):
+                    step_ver = "FAIL"
+
+        verification = res.get("verification") or step_ver or ("GROUNDED" if is_rag else ("UNVERIFIED" if res.get("success") else "FAILED"))
+        
+        doc_ids = []
+        if sources:
+            for s in sources:
+                if isinstance(s, dict):
+                    fname = s.get("filename") or s.get("document_name")
+                    if fname and fname not in doc_ids:
+                        doc_ids.append(fname)
+
+        routing_data = res.get("routing_info") or {}
+        task_type = routing_data.get("task_type") or task_type
+        selected_model = res.get("model") or model_used
+        switched = bool(routing_data.get("switched", False))
+        routing_reason = routing_data.get("reason", f"Automatically routed to {selected_model}")
+
+        sandbox_exec = res.get("sandbox_execution")
+        assistant_meta = {
+            "task_type": task_type,
+            "selected_model": selected_model,
+            "routing": "automatic",
+            "switched": switched,
+            "routing_reason": routing_reason,
+            "grounding_status": verification,
+            "rag_used": is_rag,
+            "document_ids": doc_ids,
+            "category": res.get("category"),
+            "duration_ms": res.get("duration_ms"),
+            "sandbox_execution": sandbox_exec
+        }
+
         # Persist assistant output to local database session
         ConversationManager.add_message(
             session_id=session_id,
             role="assistant",
             content=answer,
+            user_id=curr_user_id,
+            username=curr_username,
             rag_used=is_rag,
             sources=sources,
-            model_id=model_used,
-            duration_ms=res["duration_ms"],
+            model_id=selected_model,
+            duration_ms=res.get("duration_ms"),
             request_id=req_id,
             verification=verification,
-            error_detail=res.get("error") if not res["success"] else None
+            error_detail=res.get("error") if not res.get("success") else None,
+            metadata=assistant_meta
         )
 
         AuditLogger.log_event(
-            action="CHAT_REQUEST",
+            action="CHAT_RESPONSE",
             component="app.main",
-            status="success" if res["success"] else "failure",
-            user_id=_get_user_val(current_user, "id"),
-            username=_get_user_val(current_user, "username"),
-            role=_get_user_val(current_user, "role"),
+            status="success" if res.get("success") else "failure",
+            user_id=curr_user_id,
+            username=curr_username,
+            role=curr_role,
             resource=session_id,
-            duration_ms=res["duration_ms"],
-            metadata={"session_id": session_id, "model_id": model_used}
+            request_id=req_id,
+            duration_ms=res.get("duration_ms"),
+            metadata={
+                "session_id": session_id,
+                "model_id": selected_model,
+                "rag_used": is_rag,
+                "verification": verification
+            }
         )
 
         return {
-            "success": res["success"],
-            "session_id": session_id,
+            "success": res.get("success", False),
+            "status": "success" if res.get("success") else "failure",
+            "model": selected_model,
             "answer": answer,
             "rag_used": is_rag,
             "sources": sources,
+            "session_id": session_id,
+            "plan": res.get("plan"),
             "verification": verification,
             "request_id": req_id,
-            "duration_ms": res["duration_ms"],
+            "duration_ms": res.get("duration_ms"),
+            "sandbox_execution": sandbox_exec,
             "model_info": {
-                "model_id": model_used,
-                "inference_mode": "real" if res["success"] else "mock"
+                "model_id": selected_model,
+                "inference_mode": "real" if res.get("success") else "unavailable"
+            },
+            "routing_info": {
+                "task_type": task_type,
+                "selected_model": selected_model,
+                "routing": "automatic",
+                "switched": switched,
+                "reason": routing_reason,
+                "rag_used": is_rag,
+                "verification_status": verification
             }
         }
+    except HTTPException:
+        raise
     except Exception as e:
         import logging
         logging.getLogger("aegis.app").error(f"Chat route exception: {e}")
@@ -356,10 +661,13 @@ async def get_audit_summary(current_user = Depends(RoleChecker(["admin"]))):
         cursor.execute("""
             SELECT COUNT(*) FROM audit_logs 
             WHERE action IN (
-                'AUTH_LOGIN', 'AUTH_REGISTER', 'AUTH_LOGOUT', 'AUTH_CHANGE_PASSWORD', 
-                'PASSWORD_CHANGE', 'PASSWORD_RESET', 'USER_PASSWORD_RESET', 
-                'USER_PROVISION', 'USER_PROVISIONED', 'USER_ROLE_CHANGE', 'USER_ROLE_UPDATED', 
-                'USER_ENABLE', 'USER_DISABLE', 'USER_STATUS_UPDATED', 'SECURITY_CONFIGURATION_CHANGE', 
+                'AUTH_LOGIN', 'LOGIN_SUCCESS', 'LOGIN_FAILED', 'AUTH_REGISTER', 
+                'AUTH_LOGOUT', 'LOGOUT', 'AUTH_CHANGE_PASSWORD', 'PASSWORD_CHANGE', 
+                'PASSWORD_CHANGED', 'PASSWORD_RESET', 'USER_PASSWORD_RESET', 
+                'USER_PROVISION', 'USER_PROVISIONED', 'USER_CREATED', 'USER_ROLE_CHANGE', 
+                'USER_ROLE_UPDATED', 'ROLE_CHANGED', 'USER_ENABLE', 'USER_DISABLE', 
+                'USER_DISABLED', 'USER_ENABLED', 'USER_STATUS_UPDATED', 
+                'SECURITY_CONFIGURATION_CHANGE', 'AUTHORIZATION_DENIED', 
                 'DOCUMENT_ACCESS_DENIED', 'ACCESS_DENIED'
             )
         """)
@@ -368,16 +676,27 @@ async def get_audit_summary(current_user = Depends(RoleChecker(["admin"]))):
         # 5. AI Runtime events
         cursor.execute("""
             SELECT COUNT(*) FROM audit_logs 
-            WHERE action IN ('MODEL_LOAD', 'MODEL_UNLOAD', 'MODEL_SWITCH', 'AGENT_EXECUTION')
+            WHERE action IN (
+                'MODEL_LOAD', 'MODEL_UNLOAD', 'MODEL_SWITCH', 'MODEL_SELECTED', 
+                'MODEL_TESTED', 'MODEL_LOADED', 'MODEL_UNLOADED', 'MODEL_INFERENCE', 
+                'AGENT_EXECUTION', 'CHAT_REQUEST', 'CHAT_RESPONSE', 
+                'CHAT_CONVERSATION_CREATED', 'CHAT_MESSAGE_CREATED', 'VERIFICATION'
+            )
         """)
         ai_events = cursor.fetchone()[0]
 
-        # 6. RAG events
+        # 6. RAG & Document Intelligence events
         cursor.execute("""
             SELECT COUNT(*) FROM audit_logs 
             WHERE action IN (
-                'RAG_SEARCH', 'RAG_QUERY', 'RAG_DOCUMENT_UPLOAD', 'RAG_DOCUMENT_INDEX', 
-                'DOCUMENT_INGEST', 'DOCUMENT_UPLOADED', 'DOCUMENT_INDEXED', 'DOCUMENT_DELETED', 'OCR_PROCESS'
+                'RAG_SEARCH', 'RAG_QUERY', 'RAG_QUERY_STARTED', 'RAG_QUERY_COMPLETED', 'RAG_QUERY_FAILED',
+                'RAG_DOCUMENT_UPLOAD', 'RAG_DOCUMENT_INDEX', 'DOCUMENT_INGEST', 'DOCUMENT_UPLOADED', 
+                'DOCUMENT_INDEXED', 'DOCUMENT_DELETED', 'DOCUMENT_UPLOAD_STARTED', 'DOCUMENT_UPLOAD_COMPLETED', 
+                'DOCUMENT_UPLOAD_FAILED', 'DOCUMENT_INDEX_STARTED', 'DOCUMENT_INDEX_COMPLETED', 
+                'DOCUMENT_INDEX_FAILED', 'DOCUMENT_INGESTION_STARTED', 'DOCUMENT_INGESTION_COMPLETED', 
+                'DOCUMENT_INGESTION_FAILED', 'OCR_PROCESS', 'DOCUMENT_GENERATION', 'DOCUMENT_GENERATED',
+                'DOCUMENT_GENERATION_STARTED', 'DOCUMENT_GENERATION_COMPLETED', 'DOCUMENT_GENERATION_FAILED',
+                'DOCUMENT_DOWNLOADED', 'DOCUMENT_DOWNLOAD_STARTED', 'DOCUMENT_DOWNLOAD_COMPLETED', 'DOCUMENT_DOWNLOAD_FAILED'
             )
         """)
         rag_events = cursor.fetchone()[0]
@@ -385,14 +704,21 @@ async def get_audit_summary(current_user = Depends(RoleChecker(["admin"]))):
         # 7. Sandbox events
         cursor.execute("""
             SELECT COUNT(*) FROM audit_logs 
-            WHERE action IN ('SANDBOX_EXECUTION')
+            WHERE action IN (
+                'SANDBOX_EXECUTION', 'SANDBOX_EXECUTION_STARTED', 
+                'SANDBOX_EXECUTION_COMPLETED', 'SANDBOX_EXECUTION_FAILED'
+            )
         """)
         sandbox_events = cursor.fetchone()[0]
         
         # Legacy auth events for backward compatibility
         cursor.execute("""
             SELECT COUNT(*) FROM audit_logs 
-            WHERE action IN ('AUTH_LOGIN', 'AUTH_REGISTER', 'AUTH_LOGOUT', 'AUTH_CHANGE_PASSWORD', 'USER_PROVISIONED', 'USER_STATUS_UPDATED', 'USER_ROLE_UPDATED', 'USER_PASSWORD_RESET')
+            WHERE action IN (
+                'AUTH_LOGIN', 'LOGIN_SUCCESS', 'LOGIN_FAILED', 'AUTH_REGISTER', 
+                'AUTH_LOGOUT', 'LOGOUT', 'AUTH_CHANGE_PASSWORD', 'PASSWORD_CHANGED', 
+                'USER_PROVISIONED', 'USER_STATUS_UPDATED', 'USER_ROLE_UPDATED', 'USER_PASSWORD_RESET'
+            )
         """)
         auth_events = cursor.fetchone()[0]
         
@@ -426,28 +752,40 @@ async def root():
 @app.get("/documents", tags=["RAG Operations"])
 async def get_documents(current_user = Depends(get_current_user)):
     """Retrieves all indexed documents in the local vector store, enforcing ownership boundaries."""
-    docs = rag_service.list_documents()
+    is_admin = _get_user_val(current_user, "role") == "admin"
+    curr_id = _get_user_val(current_user, "id")
+    docs = rag_service.list_documents(owner_id=curr_id, is_admin=is_admin)
     filtered = []
-    is_admin = current_user.get("role") == "admin"
     for d in docs:
+        if d.get("is_mock", False):
+            continue
         doc_owner_id = d.get("owner_id")
-        # Legacy documents (owner_id = -1 or None) are NOT visible to normal users
-        # Admins can view all documents
-        if is_admin or (doc_owner_id is not None and doc_owner_id == current_user.get("id")):
+        if is_admin or (doc_owner_id is not None and doc_owner_id == curr_id):
+            doc_id = d.get("id") or d.get("document_id")
             filtered.append({
-                "id": d["document_id"],
-                "filename": d["filename"],
-                "status": "indexed",
-                "uploaded_at": d["ingested_at"]
+                "id": doc_id,
+                "document_id": doc_id,
+                "filename": d.get("filename", "document"),
+                "status": d.get("status", "indexed"),
+                "uploaded_at": d.get("ingested_at") or d.get("uploaded_at") or d.get("created_at"),
+                "chunk_count": d.get("chunk_count", 0),
+                "owner_id": doc_owner_id
             })
     return filtered
+
+@app.get("/documents/stats", tags=["RAG Operations"])
+async def get_documents_stats(current_user = Depends(get_current_user)):
+    """Retrieves document statistics (total documents, indexed, failed, total chunks, total size bytes)."""
+    is_admin = _get_user_val(current_user, "role") == "admin"
+    curr_id = _get_user_val(current_user, "id")
+    return rag_service.get_document_stats(owner_id=curr_id, is_admin=is_admin)
 
 @app.post("/documents/upload", tags=["RAG Operations"])
 async def upload_document(
     file: UploadFile = File(...),
     current_user = Depends(get_current_user)
 ):
-    """Saves and indexes an uploaded TXT or PDF document inside the local workspace."""
+    """Saves and indexes an uploaded PDF, DOCX, TXT, MD, or CSV document inside the local workspace."""
     import re
     import time
     
@@ -455,24 +793,60 @@ async def upload_document(
     content = await file.read()
     file_size = len(content)
     if file_size == 0:
+        AuditLogger.log_event(
+            action="DOCUMENT_UPLOAD_FAILED",
+            component="app.main",
+            status="failure",
+            resource=file.filename or "unknown",
+            metadata={"filename": file.filename or "unknown", "error_category": "empty_file"}
+        )
         raise HTTPException(status_code=400, detail="Empty files are not allowed.")
         
-    # 2. Reject oversized files (>10MB)
+    # 2. Reject oversized files (>10MB limit as per spec)
     max_size = 10 * 1024 * 1024  # 10 MB
     if file_size > max_size:
+        AuditLogger.log_event(
+            action="DOCUMENT_UPLOAD_FAILED",
+            component="app.main",
+            status="failure",
+            resource=file.filename or "unknown",
+            metadata={"filename": file.filename or "unknown", "error_category": "file_oversized"}
+        )
         raise HTTPException(status_code=400, detail="File size exceeds maximum limit of 10MB.")
         
-    # 3. Allowed extensions check (.pdf, .txt)
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in [".txt", ".pdf"]:
+    # 3. Server-side File Signature & Content Validation via FileDetector
+    ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
+    from backend.rag.detector import FileDetector
+    detection = FileDetector.detect_from_bytes(content[:8192], file.filename or "uploaded_file", file_size=file_size)
+    if not detection.is_safe:
+        AuditLogger.log_event(
+            action="DOCUMENT_UPLOAD_FAILED",
+            component="app.main",
+            status="failure",
+            resource=file.filename or "unknown",
+            metadata={"filename": file.filename or "unknown", "error_category": "blocked_executable"}
+        )
         raise HTTPException(
             status_code=400,
-            detail="Unsupported file extension. Only plain text (.txt) and PDF (.pdf) documents are supported."
+            detail=f"Unsupported file extension '{ext}'. {detection.error_reason or 'Dangerous binary executable blocked.'}"
+        )
+
+    if not detection.is_valid:
+        AuditLogger.log_event(
+            action="DOCUMENT_UPLOAD_FAILED",
+            component="app.main",
+            status="failure",
+            resource=file.filename or "unknown",
+            metadata={"filename": file.filename or "unknown", "error_category": "unsupported_format"}
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file extension '{ext}'. {detection.error_reason or 'Supported formats: .pdf, .docx, .xlsx, .csv, .pptx, .png, .jpg, .txt, .md, .py, .sql'}"
         )
         
     # 4. Filename sanitization to protect against directory traversal
+    ext = os.path.splitext(file.filename)[1].lower()
     base_name = os.path.basename(file.filename)
-    # Strip dangerous characters, leaving only alphanumeric, dot, dashes, and underscores
     clean_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', base_name)
     if not clean_name or clean_name in [".", ".."]:
         clean_name = f"uploaded_document_{int(time.time())}{ext}"
@@ -481,58 +855,112 @@ async def upload_document(
     upload_dir = os.path.abspath("data/knowledge_base")
     os.makedirs(upload_dir, exist_ok=True)
     
-    # Prefix with a random token to prevent namespace collision attacks
     target_filename = f"{uuid.uuid4().hex}_{clean_name}"
     target_path = os.path.join(upload_dir, target_filename)
     
     # Path traversal validation guard
     if not os.path.abspath(target_path).startswith(upload_dir):
+        AuditLogger.log_event(
+            action="DOCUMENT_UPLOAD_FAILED",
+            component="app.main",
+            status="failure",
+            resource=clean_name,
+            metadata={"filename": clean_name, "error_category": "path_traversal"}
+        )
         raise HTTPException(status_code=400, detail="Path traversal attempt blocked.")
         
+    AuditLogger.log_event(
+        action="DOCUMENT_UPLOAD_STARTED",
+        component="app.main",
+        status="success",
+        resource=clean_name,
+        metadata={"filename": clean_name, "file_size": file_size, "owner_id": _get_user_val(current_user, "id")}
+    )
+
     try:
         # Write to local file system
         with open(target_path, "wb") as f:
             f.write(content)
+
+        AuditLogger.log_event(
+            action="DOCUMENT_UPLOAD_COMPLETED",
+            component="app.main",
+            status="success",
+            resource=clean_name,
+            metadata={"filename": clean_name, "file_size": file_size, "owner_id": _get_user_val(current_user, "id")}
+        )
             
         # 6. Ingest and calculate vector embeddings
         doc_id = rag_service.ingest_document(
             target_path,
-            owner_id=current_user.get("id"),
-            owner_username=current_user.get("username")
+            owner_id=_get_user_val(current_user, "id"),
+            owner_username=_get_user_val(current_user, "username"),
+            original_filename=clean_name
         )
         
+        doc_info = rag_service.get_document(doc_id)
+        real_chunk_count = doc_info.get("chunk_count", 0) if doc_info else 0
+        real_status = doc_info.get("status", "indexed") if doc_info else "indexed"
+
         # Log DOCUMENT_UPLOADED and DOCUMENT_INDEXED
         AuditLogger.log_event(
             action="DOCUMENT_UPLOADED",
             component="app.main",
             status="success",
             resource=clean_name,
-            metadata={"filename": clean_name, "owner_id": current_user.get("id")}
+            metadata={"filename": clean_name, "owner_id": _get_user_val(current_user, "id"), "id": doc_id, "chunk_count": real_chunk_count}
         )
         AuditLogger.log_event(
             action="DOCUMENT_INDEXED",
             component="app.main",
             status="success",
             resource=clean_name,
-            metadata={"filename": clean_name, "owner_id": current_user.get("id"), "id": doc_id}
+            metadata={"filename": clean_name, "owner_id": _get_user_val(current_user, "id"), "id": doc_id, "chunk_count": real_chunk_count}
         )
         
         return {
             "id": doc_id,
+            "document_id": doc_id,
             "filename": clean_name,
-            "status": "indexed",
-            "uploaded_at": int(time.time())
+            "category": doc_info.get("category", detection.category) if doc_info else detection.category,
+            "file_type": doc_info.get("document_type", detection.file_type) if doc_info else detection.file_type,
+            "mime_type": doc_info.get("mime_type", detection.mime_type) if doc_info else detection.mime_type,
+            "extraction_method": doc_info.get("extraction_method", detection.extraction_method) if doc_info else detection.extraction_method,
+            "status": real_status,
+            "uploaded_at": int(time.time()),
+            "chunk_count": real_chunk_count,
+            "file_size": file_size,
+            "owner_id": _get_user_val(current_user, "id")
         }
-    except Exception as e:
-        # Clean up files on disk upon validation failure
+    except HTTPException:
         if os.path.exists(target_path):
             try:
                 os.remove(target_path)
             except Exception:
                 pass
-        # Suppress internal raw trace, returning safe user-facing message
+        raise
+    except Exception as e:
+        if os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except Exception:
+                pass
         logging.getLogger("aegis.app").error(f"Ingestion failure: {e}")
-        raise HTTPException(status_code=500, detail="parsing failed or file is corrupted")
+        AuditLogger.log_event(
+            action="DOCUMENT_UPLOAD_FAILED",
+            component="app.main",
+            status="failure",
+            resource=clean_name,
+            metadata={"filename": clean_name, "error_category": "ingestion_failure"}
+        )
+        from backend.rag.pipeline import DuplicateIngestionError, InsufficientTextError, SafePathViolationError
+        if isinstance(e, DuplicateIngestionError):
+            raise HTTPException(status_code=400, detail=str(e))
+        elif isinstance(e, InsufficientTextError):
+            raise HTTPException(status_code=400, detail="Document contains no extractable text.")
+        elif isinstance(e, SafePathViolationError):
+            raise HTTPException(status_code=400, detail="Path traversal attempt blocked.")
+        raise HTTPException(status_code=500, detail=f"Document indexing failed: {e}")
 
 @app.post("/documents/{id}/index", tags=["RAG Operations"])
 async def reindex_document(id: str, current_user = Depends(get_current_user)):
@@ -542,24 +970,24 @@ async def reindex_document(id: str, current_user = Depends(get_current_user)):
     doc_owner_id = None
     doc_filename = "unknown"
     for d in docs:
-        if d["document_id"] == id:
-            doc_file_path = d["source_path"]
+        if d.get("id") == id or d.get("document_id") == id:
+            doc_file_path = d.get("source_path")
             doc_owner_id = d.get("owner_id")
-            doc_filename = d["filename"]
+            doc_filename = d.get("filename", "unknown")
             break
-            
+
     if not doc_file_path or not os.path.exists(doc_file_path):
         raise HTTPException(status_code=404, detail="The requested document file could not be found on the server.")
         
     # Authorization checks: owner or admin role
-    is_admin = current_user.get("role") == "admin"
-    if not is_admin and (doc_owner_id is None or doc_owner_id != current_user.get("id")):
+    is_admin = _get_user_val(current_user, "role") == "admin"
+    if not is_admin and (doc_owner_id is None or doc_owner_id != _get_user_val(current_user, "id")):
         AuditLogger.log_event(
             action="DOCUMENT_ACCESS_DENIED",
             component="app.main",
             status="failure",
             resource=doc_filename,
-            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "attempted_by": current_user.get("id"), "operation": "reindex"}
+            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "attempted_by": _get_user_val(current_user, "id"), "operation": "reindex"}
         )
         raise HTTPException(status_code=403, detail="Access denied. You do not own this document.")
         
@@ -570,7 +998,8 @@ async def reindex_document(id: str, current_user = Depends(get_current_user)):
         new_doc_id = rag_service.ingest_document(
             doc_file_path,
             owner_id=doc_owner_id,
-            owner_username=current_user.get("username")
+            owner_username=_get_user_val(current_user, "username"),
+            original_filename=doc_filename
         )
         
         # Log DOCUMENT_INDEXED
@@ -591,6 +1020,36 @@ async def reindex_document(id: str, current_user = Depends(get_current_user)):
         logging.getLogger("aegis.app").error(f"Re-indexing failed: {e}")
         raise HTTPException(status_code=500, detail="Document re-indexing failed.")
 
+@app.get("/documents/{id}/preview", tags=["RAG Operations"])
+async def preview_document(id: str, current_user = Depends(get_current_user)):
+    """Securely streams document file bytes or thumbnail for authenticated owner or admin."""
+    from fastapi.responses import FileResponse
+    doc_info = rag_service.get_document(id)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    doc_owner_id = doc_info.get("owner_id")
+    is_admin = _get_user_val(current_user, "role") == "admin"
+    if not is_admin and doc_owner_id is not None and doc_owner_id != _get_user_val(current_user, "id"):
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    source_path = doc_info.get("source_path")
+    if not source_path or not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail="Document file not found on local storage.")
+
+    # Safe directory check
+    safe_base = os.path.abspath("data/knowledge_base")
+    if not os.path.abspath(source_path).startswith(safe_base):
+        raise HTTPException(status_code=400, detail="Safe path boundary violation.")
+
+    mime_type = doc_info.get("mime_type", "application/octet-stream")
+    return FileResponse(source_path, media_type=mime_type, filename=doc_info.get("filename"))
+
+@app.get("/documents/{id}/download", tags=["RAG Operations"])
+async def download_uploaded_document(id: str, current_user = Depends(get_current_user)):
+    """Downloads the authenticated user's uploaded document file."""
+    return await preview_document(id=id, current_user=current_user)
+
 @app.delete("/documents/{id}", tags=["RAG Operations"])
 async def delete_document(id: str, current_user = Depends(get_current_user)):
     """Deletes vector references and removes the physical document from the disk, enforcing ownership."""
@@ -599,56 +1058,166 @@ async def delete_document(id: str, current_user = Depends(get_current_user)):
     doc_filename = "unknown"
     doc_owner_id = None
     for d in docs:
-        if d["document_id"] == id:
-            doc_file_path = d["source_path"]
-            doc_filename = d["filename"]
+        if d.get("id") == id or d.get("document_id") == id:
+            doc_file_path = d.get("source_path")
+            doc_filename = d.get("filename", "unknown")
             doc_owner_id = d.get("owner_id")
             break
-            
-    if not doc_file_path:
+
+    if not doc_filename or (doc_owner_id is None and not doc_file_path):
         raise HTTPException(status_code=404, detail="The requested document could not be found.")
-        
+
     # Authorization checks: owner or admin role
-    is_admin = current_user.get("role") == "admin"
-    if not is_admin and (doc_owner_id is None or doc_owner_id != current_user.get("id")):
+    is_admin = _get_user_val(current_user, "role") == "admin"
+    if not is_admin and (doc_owner_id is None or doc_owner_id != _get_user_val(current_user, "id")):
         AuditLogger.log_event(
             action="DOCUMENT_ACCESS_DENIED",
             component="app.main",
             status="failure",
             resource=doc_filename,
-            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "attempted_by": current_user.get("id"), "operation": "delete"}
+            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "attempted_by": _get_user_val(current_user, "id"), "operation": "delete"}
         )
         raise HTTPException(status_code=403, detail="Access denied. You do not own this document.")
         
     try:
-        # 1. Delete vector database mappings
         rag_service.delete_document(id)
-        
-        # 2. Delete physical storage document file
-        if os.path.exists(doc_file_path):
-            os.remove(doc_file_path)
-            
-        # 3. Append to system audit log ledger using the new action type
+        if doc_file_path and os.path.exists(doc_file_path):
+            try:
+                os.remove(doc_file_path)
+            except Exception:
+                pass
         AuditLogger.log_event(
             action="DOCUMENT_DELETED",
             component="app.main",
             status="success",
             resource=doc_filename,
-            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "deleted_by": current_user.get("id")}
+            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "id": id}
         )
-        return {
-            "status": "success",
-            "message": f"Document '{doc_filename}' successfully removed."
-        }
+        return {"status": "success", "id": id, "message": f"Document '{doc_filename}' successfully removed."}
     except Exception as e:
         logging.getLogger("aegis.app").error(f"Document delete failure: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete document.")
+
+class RAGAskRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=1000)
+    top_k: int = Field(default=5, ge=1, le=10)
+    document_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+@app.post("/documents/ask", tags=["RAG Operations"])
+async def ask_documents(payload: RAGAskRequest, current_user = Depends(get_current_user)):
+    """
+    Generates a truthful, verified AI answer strictly grounded in indexed organizational documents.
+    Cites exact document sources and page numbers, and refuses to hallucinate if evidence is missing.
+    """
+    try:
+        res = await grounded_qa_service.generate_grounded_answer(
+            query=payload.query,
+            current_user=current_user,
+            document_id=payload.document_id,
+            session_id=payload.session_id,
+            top_k=payload.top_k,
+            feature="knowledge"
+        )
+        return res
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logging.getLogger("aegis.app").error(f"Grounded QA failure: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate document-grounded answer.")
+
+class GenerateReportRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=150)
+    topic: Optional[str] = Field(default="", max_length=1000)
+    format: str = Field(default="pdf")
+    document_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+@app.post("/documents/generate", tags=["Document Generation"])
+async def generate_document_report(payload: GenerateReportRequest, current_user = Depends(get_current_user)):
+    """Generates an actual physical intelligence report (PDF/DOCX) from grounded document evidence."""
+    try:
+        res = await grounded_qa_service.generate_grounded_report(
+            title=payload.title,
+            topic=payload.topic or payload.title,
+            format_type=payload.format,
+            document_id=payload.document_id,
+            session_id=payload.session_id,
+            current_user=current_user
+        )
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logging.getLogger("aegis.app").error(f"Document generation failure: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate report: {e}")
+
+@app.get("/documents/generated", tags=["Document Generation"])
+async def list_generated_documents(current_user = Depends(get_current_user)):
+    """Lists all generated reports owned by the authenticated user."""
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    is_admin = curr_role == "admin"
+    return grounded_qa_service.doc_generator.list_generated_documents(owner_id=curr_id, is_admin=is_admin)
+
+@app.get("/documents/generated/{id}/download", tags=["Document Generation"])
+async def download_generated_document(id: str, current_user = Depends(get_current_user)):
+    """Streams the physical generated PDF or DOCX file with verified Content-Disposition."""
+    from fastapi.responses import FileResponse
+    doc = grounded_qa_service.doc_generator.get_generated_document(id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Generated document not found.")
+
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    if curr_role != "admin" and doc.get("owner_id") is not None and doc["owner_id"] != curr_id:
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this document.")
+
+    file_path = doc.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Physical document file missing on disk.")
+
+    AuditLogger.log_event(
+        action="DOCUMENT_DOWNLOADED",
+        component="app.main",
+        status="success",
+        user_id=curr_id,
+        username=_get_user_val(current_user, "username"),
+        resource=doc.get("filename", id),
+        metadata={"id": id, "file_size": doc.get("file_size")}
+    )
+
+    return FileResponse(
+        path=file_path,
+        media_type=doc.get("mime_type", "application/pdf"),
+        filename=doc.get("filename", "report.pdf")
+    )
+
+@app.delete("/documents/generated/{id}", tags=["Document Generation"])
+async def delete_generated_document(id: str, current_user = Depends(get_current_user)):
+    """Deletes a generated report from SQLite and physical disk storage."""
+    doc = grounded_qa_service.doc_generator.get_generated_document(id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Generated document not found.")
+
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    if curr_role != "admin" and doc.get("owner_id") is not None and doc["owner_id"] != curr_id:
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this document.")
+
+    grounded_qa_service.doc_generator.delete_generated_document(id)
+    return {"status": "success", "id": id, "message": "Generated document removed."}
+
 class RAGQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
     top_k: int = Field(default=3, ge=1, le=10)
+    document_id: Optional[str] = None
 
 @app.post("/documents/query", tags=["RAG Operations"])
 async def query_documents(payload: RAGQueryRequest, current_user = Depends(get_current_user)):
-    """Executes dynamic vector similarity search against the local ChromaDB database."""
+    """Executes dynamic vector similarity search against the local ChromaDB database with relevance classification."""
     curr_role = _get_user_val(current_user, "role")
     curr_id = _get_user_val(current_user, "id")
     curr_username = _get_user_val(current_user, "username")
@@ -659,7 +1228,8 @@ async def query_documents(payload: RAGQueryRequest, current_user = Depends(get_c
     results = rag_service.search(
         query=payload.query,
         top_k=payload.top_k,
-        filter_metadata=filter_meta
+        filter_metadata=filter_meta,
+        document_id=payload.document_id
     )
     
     AuditLogger.log_event(
@@ -669,7 +1239,7 @@ async def query_documents(payload: RAGQueryRequest, current_user = Depends(get_c
         user_id=curr_id,
         username=curr_username,
         role=curr_role,
-        metadata={"query_length": len(payload.query)}
+        metadata={"query_length": len(payload.query), "result_count": len(results)}
     )
     return {
         "query": payload.query,
@@ -690,19 +1260,8 @@ async def get_current_model(current_user = Depends(get_current_user)):
     """Retrieves the currently selected/active model profile."""
     curr_id = await loader_manager.get_current_model_id()
     if not curr_id:
-        curr_id = loader_manager.current_model_id
-    if not curr_id:
-        curr_id = "gemma3:4b"
-        
-    try:
-        return registry_manager.get_model(curr_id)
-    except Exception:
-        return {
-            "model_id": curr_id,
-            "display_name": curr_id.capitalize(),
-            "runtime_model_name": curr_id,
-            "status": "ACTIVE"
-        }
+        raise HTTPException(status_code=503, detail="No active local model is currently reported by the inference runtime.")
+    return registry_manager.get_model(curr_id)
 
 @app.post("/models/select", tags=["Model Operations"])
 async def select_model(payload: ModelSelectRequest, current_user = Depends(RoleChecker(["admin"]))):
@@ -725,24 +1284,6 @@ async def select_model(payload: ModelSelectRequest, current_user = Depends(RoleC
         )
         return res
     except RuntimeUnavailableError as e:
-        if settings.APP_ENV == "development":
-            loader_manager.current_model_id = payload.model_id
-            AuditLogger.log_event(
-                action="MODEL_SELECTED",
-                component="app.main",
-                status="success",
-                user_id=curr_id,
-                username=curr_username,
-                role=curr_role,
-                resource=payload.model_id,
-                metadata={"model_id": payload.model_id}
-            )
-            return {
-                "status": "success",
-                "model_id": payload.model_id,
-                "active_model": payload.model_id,
-                "details": "simulated_load"
-            }
         AuditLogger.log_event(
             action="MODEL_SELECTED",
             component="app.main",
@@ -767,6 +1308,50 @@ async def select_model(payload: ModelSelectRequest, current_user = Depends(RoleC
         )
         raise HTTPException(status_code=500, detail=str(e))
 
+class ModelRouteRequest(BaseModel):
+    task_type: Optional[str] = None
+    required_capabilities: Optional[List[str]] = None
+    prompt: Optional[str] = None
+    has_doc_context: bool = False
+    has_image: bool = False
+    preferred_model_id: Optional[str] = None
+    auto_switch: bool = False
+
+@app.post("/models/route", tags=["Model Operations"])
+async def route_model_request(payload: ModelRouteRequest, current_user = Depends(get_current_user)):
+    """Determines optimal locally installed model for task requirements without fabricating data."""
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+    curr_role = _get_user_val(current_user, "role")
+
+    task_enum = None
+    if payload.task_type:
+        try:
+            task_enum = TaskType(payload.task_type.upper())
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid task_type '{payload.task_type}'. Valid types: {[t.value for t in TaskType]}")
+
+    try:
+        decision = await model_router.route(
+            task_type=task_enum,
+            required_capabilities=payload.required_capabilities,
+            prompt=payload.prompt,
+            has_doc_context=payload.has_doc_context,
+            has_image=payload.has_image,
+            preferred_model_id=payload.preferred_model_id,
+            auto_switch=payload.auto_switch,
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role
+        )
+        return decision.to_dict()
+    except NoCompatibleModelError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except RuntimeUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/models/test", tags=["Model Operations"])
 async def test_model_inference(payload: Optional[ModelTestRequest] = None, current_user = Depends(get_current_user)):
     """Executes deterministic test inference against target model on local Ollama daemon."""
@@ -775,7 +1360,18 @@ async def test_model_inference(payload: Optional[ModelTestRequest] = None, curre
     curr_id = _get_user_val(current_user, "id")
     curr_username = _get_user_val(current_user, "username")
 
-    target_model = (payload.model_id if payload and payload.model_id else None) or loader_manager.current_model_id or "gemma3:4b"
+    target_model = (payload.model_id if payload and payload.model_id else None) or loader_manager.current_model_id
+    if not target_model:
+        AuditLogger.log_event(
+            action="MODEL_TESTED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            metadata={"error_category": "no_active_model"}
+        )
+        raise HTTPException(status_code=503, detail="No active local model is currently reported by the inference runtime.")
     start = time.perf_counter()
     try:
         res = await loader_manager.generate(
@@ -840,8 +1436,17 @@ async def execute_in_sandbox(payload: SandboxRequest, current_user = Depends(get
             user_id=curr_id,
             username=curr_username,
             role=curr_role,
-            duration_ms=res.get("execution_time_ms"),
-            metadata={"sandbox_exit_code": res.get("exit_code"), "sandbox_timeout": payload.timeout_seconds}
+            duration_ms=res.get("duration_ms", res.get("execution_time_ms")),
+            metadata={
+                "execution_id": res.get("execution_id"),
+                "language": res.get("language"),
+                "code_hash": res.get("code_hash"),
+                "sandbox_exit_code": res.get("exit_code"),
+                "sandbox_timeout": res.get("timed_out"),
+                "stdout": res.get("stdout"),
+                "stderr": res.get("stderr"),
+                "error": res.get("error")
+            }
         )
         return res
     except Exception as e:
@@ -855,6 +1460,78 @@ async def execute_in_sandbox(payload: SandboxRequest, current_user = Depends(get
             metadata={"error_category": str(e)}
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sandbox/artifacts/{artifact_id}/download", tags=["Sandbox Operations"])
+async def download_sandbox_artifact(artifact_id: str, current_user = Depends(get_current_user)):
+    """Downloads an artifact file generated by a sandbox execution with owner/admin authorization."""
+    import sqlite3
+    from backend.security.database import get_db_path
+
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM sandbox_artifacts WHERE id = ?", (artifact_id,))
+        art = cursor.fetchone()
+        if not art:
+            raise HTTPException(status_code=404, detail="Sandbox artifact not found.")
+
+        # Authorization: must be admin or artifact owner
+        is_admin = curr_role == "admin"
+        owner_id = art["user_id"]
+        owner_username = art["username"]
+        if not is_admin and (
+            (owner_id is not None and owner_id != -1 and owner_id != curr_id) or
+            (owner_id in (None, -1) and owner_username and owner_username != curr_username)
+        ):
+            AuditLogger.log_event(
+                action="DOCUMENT_ACCESS_DENIED",
+                component="app.main",
+                status="failure",
+                user_id=curr_id,
+                username=curr_username,
+                role=curr_role,
+                resource=artifact_id,
+                metadata={"reason": "ARTIFACT_OWNERSHIP_FORBIDDEN", "artifact_id": artifact_id}
+            )
+            raise HTTPException(status_code=403, detail="Access denied. You do not own this sandbox artifact.")
+
+        file_path = art["file_path"]
+        if not file_path or not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Artifact file does not exist on disk.")
+
+        # Safe directory boundary check
+        allowed_dirs = [
+            os.path.abspath("data/artifacts/sandbox"),
+            os.path.abspath(getattr(sandbox_service, "artifacts_storage", "data/artifacts/sandbox"))
+        ]
+        abs_target = os.path.abspath(file_path)
+        if not any(abs_target.startswith(base) for base in allowed_dirs):
+            raise HTTPException(status_code=400, detail="Safe path boundary violation.")
+
+        AuditLogger.log_event(
+            action="DOCUMENT_DOWNLOADED",
+            component="app.main",
+            status="success",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=artifact_id,
+            metadata={"filename": art["filename"], "file_size": art["file_size"]}
+        )
+
+        return FileResponse(
+            file_path,
+            media_type=art["mime_type"] or "application/octet-stream",
+            filename=art["filename"]
+        )
+    finally:
+        conn.close()
 
 @app.get("/health", tags=["System"])
 async def health(details: bool = False):

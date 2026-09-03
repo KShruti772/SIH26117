@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test tests/auth.test.js tests/chat.test.js tests/models.test.js tests/rag.test.js tests/truthfulness.test.js"
+    "test": "node --test tests/auth.test.js tests/chat.test.js tests/models.test.js tests/rag.test.js tests/truthfulness.test.js tests/intent.test.js"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",

@@ -5,7 +5,7 @@ import { LogoutOutlined, MenuOutlined, SafetyCertificateOutlined } from "@ant-de
 import { useAuth } from "../providers/AuthProvider";
 import { env } from "../../lib/config/env";
 import { TabId } from "./Sidebar";
-const LABELS: Record<TabId, [string, string]> = { dashboard: ["Workspace", "Dashboard"], chat: ["Workspace", "AI Assistant"], rag: ["Knowledge", "Knowledge Base"], documents: ["Knowledge", "Documents"], models: ["AI Runtime", "Models"], sandbox: ["AI Runtime", "Sandbox"], audit: ["Security", "Audit Ledger"], access: ["Security", "User Management"], settings: ["System", "Settings"], about: ["System", "About AEGIS"] };
+const LABELS: Record<TabId, [string, string]> = { dashboard: ["Workspace", "Dashboard"], chat: ["Workspace", "AI Assistant"], history: ["Workspace", "Workspace History"], rag: ["Knowledge", "Knowledge Base"], documents: ["Knowledge", "Documents"], models: ["AI Runtime", "Models"], sandbox: ["AI Runtime", "Sandbox"], audit: ["Security", "Audit Ledger"], access: ["Security", "User Management"], settings: ["System", "Settings"], about: ["System", "About AEGIS"] };
 interface HeaderProps { activeTab: TabId; currentModelName?: string; documentCount?: number; onMenuToggle?: () => void; }
 export default function Header({ activeTab, onMenuToggle }: HeaderProps) {
   const { user, logout } = useAuth(); const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);

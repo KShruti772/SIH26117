@@ -1,10 +1,12 @@
 import os
 import unittest
 import sqlite3
+import tempfile
 from fastapi import status
 from fastapi.testclient import TestClient
 from backend.app.main import app
 from backend.security.database import get_db, get_db_path, init_db
+from backend.app.config.settings import settings
 from backend.security.auth import create_access_token, hash_password
 from backend.agents.conversations import ConversationManager
 from backend.security.audit import AuditLogger
@@ -14,8 +16,18 @@ class TestAegisRBAC(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.original_db_path = settings.AUTH_DB_PATH
+        cls.test_dir = tempfile.mkdtemp()
+        settings.AUTH_DB_PATH = os.path.join(cls.test_dir, "audit.db")
         init_db()
         cls.client = TestClient(app)
+
+    @classmethod
+    def tearDownClass(cls):
+        settings.AUTH_DB_PATH = cls.original_db_path
+        for filename in os.listdir(cls.test_dir):
+            os.remove(os.path.join(cls.test_dir, filename))
+        os.rmdir(cls.test_dir)
 
     def setUp(self):
         db_path = get_db_path()

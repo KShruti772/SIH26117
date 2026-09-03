@@ -118,6 +118,21 @@ npm install
 npm run build
 ```
 
+### macOS/Linux Local Bootstrap
+```bash
+# From the project root
+cp .env.example .env  # only when .env does not already exist
+python3 -m venv backend/.venv
+source backend/.venv/bin/activate
+python -m pip install -r backend/requirements.txt
+python scripts/seed-users.py
+
+cd frontend
+npm install
+```
+
+`scripts/seed-users.py` is the repository's idempotent local demo-account bootstrap step. It initializes the SQLite schema, creates only missing demo accounts, and stores bcrypt hashes rather than plaintext passwords. It is intended for local development/evaluation; production accounts must be provisioned through the approved administrative process.
+
 ---
 
 ## 7. Environment Configuration (`.env`)
