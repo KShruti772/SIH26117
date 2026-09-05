@@ -25,7 +25,7 @@ if PROJECT_ROOT not in sys.path:
 
 from backend.app.config.settings import settings
 from backend.security.database import init_db, get_db_path
-from backend.security.auth import hash_password
+from backend.security.auth import hash_password, verify_password
 
 # Configured demo account definitions
 DEMO_ACCOUNTS = [
@@ -40,7 +40,8 @@ DEMO_ACCOUNTS = [
 def seed_demo_users(db_path: str = None) -> dict:
     """
     Idempotently seeds demo user accounts into local SQLite auth database.
-    Does not overwrite existing user accounts or alter existing passwords/roles.
+    Repairs corrupt/malformed password hashes using canonical hash_password().
+    Does not overwrite valid existing user passwords or alter existing custom users.
     """
     # 1. Initialize schema if database does not exist
     init_db()
@@ -48,17 +49,31 @@ def seed_demo_users(db_path: str = None) -> dict:
     target_db = db_path or get_db_path()
     created_count = 0
     existing_count = 0
+    repaired_count = 0
     
     conn = sqlite3.connect(target_db)
     try:
         cursor = conn.cursor()
         for username, role, plain_password in DEMO_ACCOUNTS:
-            cursor.execute("SELECT id, role FROM users WHERE username = ?", (username,))
+            cursor.execute("SELECT id, role, password_hash FROM users WHERE username = ?", (username,))
             row = cursor.fetchone()
             
             if row:
-                existing_count += 1
-                print(f"[EXISTS] {username} ({row[1]})")
+                stored_hash = row[2]
+                # Check if stored hash is corrupted / malformed (e.g. not a valid bcrypt hash)
+                is_valid_bcrypt = bool(stored_hash and str(stored_hash).startswith(("$2a$", "$2b$", "$2y$")))
+                is_matching = verify_password(plain_password, stored_hash) if is_valid_bcrypt else False
+                
+                if not is_valid_bcrypt or not is_matching:
+                    new_hash = hash_password(plain_password)
+                    cursor.execute("""
+                        UPDATE users SET password_hash = ?, is_active = 1 WHERE username = ?
+                    """, (new_hash, username))
+                    repaired_count += 1
+                    print(f"[REPAIR] {username} (restored valid bcrypt hash)")
+                else:
+                    existing_count += 1
+                    print(f"[EXISTS] {username} ({row[1]})")
             else:
                 hashed = hash_password(plain_password)
                 cursor.execute("""
@@ -72,7 +87,12 @@ def seed_demo_users(db_path: str = None) -> dict:
     finally:
         conn.close()
         
-    return {"created": created_count, "existing": existing_count, "total_demo": len(DEMO_ACCOUNTS)}
+    return {
+        "created": created_count,
+        "existing": existing_count,
+        "repaired": repaired_count,
+        "total_demo": len(DEMO_ACCOUNTS)
+    }
 
 if __name__ == "__main__":
     print("=========================================")

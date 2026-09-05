@@ -266,7 +266,10 @@ class GroundedQAService:
             metadata={"query_length": len(clean_query), "document_id": document_id, "feature": feature}
         )
 
+        from backend.security.access_control import can_access_document, get_accessible_document_ids
+
         # 2. Document Scoping & Ownership Verification
+        accessible_doc_ids = get_accessible_document_ids(current_user, permission="USE_IN_RAG")
         target_doc_id = document_id
         target_doc_info = None
         if target_doc_id:
@@ -282,7 +285,7 @@ class GroundedQAService:
                     "results": [],
                     "duration_ms": int((time.perf_counter() - start_time) * 1000)
                 }
-            if not is_admin and target_doc_info.get("owner_id") is not None and target_doc_info["owner_id"] != user_id:
+            if not can_access_document(current_user, target_doc_info, permission="USE_IN_RAG"):
                 AuditLogger.log_event(
                     action="DOCUMENT_ACCESS_DENIED",
                     component="rag.grounded_qa",
@@ -305,7 +308,7 @@ class GroundedQAService:
 
         # Auto-detect target document by filename if document_id was omitted
         if not target_doc_id:
-            available_docs = self.rag_service.list_documents(owner_id=user_id, is_admin=is_admin)
+            available_docs = self.rag_service.list_documents(accessible_document_ids=accessible_doc_ids)
             q_lower = clean_query.lower()
             for d in available_docs:
                 fname = (d.get("filename") or "").lower()
@@ -503,11 +506,22 @@ class GroundedQAService:
         elif is_whole_doc and not target_doc_id:
             # If multiple documents exist and no specific one was requested, search broadly
             filter_meta = None if is_admin else {"owner_id": user_id}
-            chunks = self.rag_service.search(clean_query, top_k=max(top_k, 8), filter_metadata=filter_meta)
+            chunks = self.rag_service.search(
+                clean_query,
+                top_k=max(top_k, 8),
+                filter_metadata=filter_meta,
+                accessible_document_ids=accessible_doc_ids
+            )
         else:
             # Specific semantic search
             filter_meta = None if is_admin else {"owner_id": user_id}
-            chunks = self.rag_service.search(clean_query, top_k=top_k, filter_metadata=filter_meta, document_id=target_doc_id)
+            chunks = self.rag_service.search(
+                clean_query,
+                top_k=top_k,
+                filter_metadata=filter_meta,
+                document_id=target_doc_id,
+                accessible_document_ids=accessible_doc_ids
+            )
 
         # 5. Honest Failure Check — Zero Hallucination Guard
         if not chunks:
@@ -658,6 +672,29 @@ class GroundedQAService:
             is_refusal = any(p in answer.lower() for p in refusal_patterns)
             grounded_status = not is_refusal
 
+            # Audit Local Model Inference
+            inference_duration_ms = int((time.perf_counter() - start_time) * 1000)
+            selected_model_name = routing_info.get("selected_model") or getattr(self.model_router, "active_model_id", "default_model")
+            AuditLogger.log_event(
+                action="MODEL_INFERENCE",
+                component="rag.grounded_qa",
+                status="success",
+                user_id=user_id,
+                username=username,
+                role=user_info["role"],
+                request_id=req_id,
+                resource=str(selected_model_name),
+                duration_ms=inference_duration_ms,
+                metadata={
+                    "model": str(selected_model_name),
+                    "model_id": str(selected_model_name),
+                    "task_type": "rag_question_answering",
+                    "duration_ms": inference_duration_ms,
+                    "result": "success",
+                    "status": "success"
+                }
+            )
+
         except Exception as e:
             logger.warning(f"Local model generation failed: {e}")
             duration_ms = int((time.perf_counter() - start_time) * 1000)
@@ -755,6 +792,9 @@ class GroundedQAService:
         user_id = user_info["id"] or -1
         username = user_info["username"] or "anonymous"
         is_admin = user_info["is_admin"]
+        
+        from backend.security.access_control import can_access_document, get_accessible_document_ids
+        accessible_doc_ids = get_accessible_document_ids(current_user, permission="READ")
 
         target_doc_id = document_id
         target_doc_info = None
@@ -764,7 +804,7 @@ class GroundedQAService:
             target_doc_info = self.rag_service.get_document(target_doc_id)
             if not target_doc_info:
                 # Check if target_doc_id was passed as filename
-                available_docs = self.rag_service.list_documents(owner_id=user_id, is_admin=is_admin)
+                available_docs = self.rag_service.list_documents(accessible_document_ids=accessible_doc_ids)
                 for d in available_docs:
                     d_name = (d.get("filename") or "").lower()
                     d_orig = (d.get("original_filename") or "").lower()
@@ -777,8 +817,8 @@ class GroundedQAService:
             if not target_doc_info:
                 raise ValueError(f"Document '{document_id}' was not found among your indexed documents.")
 
-            # RBAC ownership check
-            if not is_admin and target_doc_info.get("owner_id") is not None and target_doc_info["owner_id"] != user_id:
+            # Access control check
+            if not can_access_document(current_user, target_doc_info, permission="READ"):
                 raise PermissionError("Access denied. You are not authorized to access this document.")
 
             # Physical source file check
@@ -788,7 +828,7 @@ class GroundedQAService:
 
         # Auto-detect target document if omitted
         if not target_doc_id:
-            available_docs = self.rag_service.list_documents(owner_id=user_id, is_admin=is_admin)
+            available_docs = self.rag_service.list_documents(accessible_document_ids=accessible_doc_ids)
             text_lower = f"{title} {topic}".lower()
             for d in available_docs:
                 fname = (d.get("filename") or "").lower()
@@ -806,17 +846,41 @@ class GroundedQAService:
                 target_doc_id = available_docs[0].get("id")
                 target_doc_info = available_docs[0]
 
+        # Check if target document is an image
+        doc_cat = (target_doc_info.get("category") if target_doc_info else "").lower()
+        doc_mime = (target_doc_info.get("mime_type") if target_doc_info else "").lower()
+        doc_ext = os.path.splitext(target_doc_info.get("filename", ""))[1].lower() if target_doc_info else ""
+        is_image_doc = doc_cat == "image" or doc_mime.startswith("image/") or doc_ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"]
+
         # 2. Fetch relevant evidence chunks
         chunks = []
         if target_doc_id:
             chunks = self.rag_service.get_document_chunks(target_doc_id)
         else:
             filter_meta = None if is_admin else {"owner_id": user_id}
-            chunks = self.rag_service.search(topic or title, top_k=15, filter_metadata=filter_meta)
+            chunks = self.rag_service.search(
+                topic or title,
+                top_k=15,
+                filter_metadata=filter_meta,
+                accessible_document_ids=accessible_doc_ids
+            )
 
         if not chunks:
-            doc_label = target_doc_info.get("filename") if target_doc_info else (title or "selected topic")
-            raise ValueError(f"No relevant indexed content found to compile intelligence report for '{doc_label}'.")
+            if is_image_doc or (target_doc_info and topic and topic.strip()):
+                # Construct grounded evidence chunk from verified findings for multimodal artifact
+                fname = target_doc_info.get("filename") if target_doc_info else "Visual Artifact"
+                chunks = [{
+                    "text": topic.strip(),
+                    "metadata": {
+                        "filename": fname,
+                        "document_id": target_doc_id or "image_doc",
+                        "page_number": 1
+                    },
+                    "relevance": "High"
+                }]
+            else:
+                doc_label = target_doc_info.get("filename") if target_doc_info else (title or "selected topic")
+                raise ValueError(f"No relevant indexed content found to compile intelligence report for '{doc_label}'.")
 
         # 3. Extract and group sources
         doc_pages_map: Dict[str, Dict[str, Any]] = {}
@@ -851,6 +915,7 @@ class GroundedQAService:
         primary_doc_name = target_doc_info.get("filename") if target_doc_info else "Document"
         total_text_length = sum(len(c.get("text", "")) for c in chunks)
 
+        from backend.models.router import TaskType
         sections: Dict[str, str] = {}
 
         if len(chunks) > 12:
@@ -875,7 +940,12 @@ class GroundedQAService:
                 "You are AEGIS, a sovereign on-premise industrial AI technical writer.\n"
                 "Produce an authoritative, comprehensive intelligence report adhering strictly to the verified document facts."
             )
-            res_llm = await self._call_local_llm(prompt, system_prompt=system_prompt, current_user=current_user)
+            res_llm = await self._call_local_llm(
+                prompt,
+                system_prompt=system_prompt,
+                task_type=TaskType.DOCUMENT_SUMMARY,
+                current_user=current_user
+            )
             raw_llm = res_llm["text"] if isinstance(res_llm, dict) else str(res_llm)
         else:
             # Direct Context Report Generation
@@ -901,7 +971,12 @@ class GroundedQAService:
                 "You are AEGIS, a sovereign on-premise industrial AI technical writer.\n"
                 "Produce an authoritative, comprehensive intelligence report adhering strictly to the verified document facts."
             )
-            res_llm = await self._call_local_llm(prompt, system_prompt=system_prompt, current_user=current_user)
+            res_llm = await self._call_local_llm(
+                prompt,
+                system_prompt=system_prompt,
+                task_type=TaskType.DOCUMENT_SUMMARY,
+                current_user=current_user
+            )
             raw_llm = res_llm["text"] if isinstance(res_llm, dict) else str(res_llm)
 
         # 5. Parse Sections from JSON
@@ -922,6 +997,23 @@ class GroundedQAService:
                 "Recommendations": "Ensure verified engineering procedures are followed in accordance with organizational documentation."
             }
 
+        task_type_name = "VISION_ANALYSIS" if is_image_doc else "DOCUMENT_ANALYSIS"
+        model_name = "qwen3-vl:4b" if is_image_doc else getattr(self.loader_manager, "current_model_id", "local_model")
+
+        # Determine department & visibility inheritance
+        user_dept_id = None
+        user_dept_name = None
+        if isinstance(current_user, dict):
+            user_dept_id = current_user.get("department_id")
+            user_dept_name = current_user.get("department_name")
+        else:
+            user_dept_id = getattr(current_user, "department_id", None)
+            user_dept_name = getattr(current_user, "department_name", None)
+
+        doc_visibility = target_doc_info.get("visibility", "PRIVATE") if target_doc_info else "PRIVATE"
+        doc_dept_id = target_doc_info.get("owner_department_id", user_dept_id) if target_doc_info else user_dept_id
+        doc_dept_name = target_doc_info.get("owner_department_name", user_dept_name) if target_doc_info else user_dept_name
+
         # 6. Physical File Compilation & SQLite Storage
         report_record = self.doc_generator.create_report(
             title=title,
@@ -930,8 +1022,16 @@ class GroundedQAService:
             format_type=format_type,
             owner_id=user_id,
             owner_username=username,
+            owner_department_id=doc_dept_id,
+            owner_department_name=doc_dept_name,
+            visibility=doc_visibility,
             source_document_ids=[s["document_id"] for s in sources_list if s["document_id"] != "doc"],
-            conversation_id=session_id
+            conversation_id=session_id,
+            metadata={
+                "task_type": task_type_name,
+                "model": model_name,
+                "source_filename": primary_doc_name
+            }
         )
 
         return report_record

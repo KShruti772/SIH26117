@@ -58,7 +58,6 @@ interface UnifiedHistoryItem {
   id: string;
   category: "AI" | "KNOWLEDGE" | "CODE";
   title: string;
-  subtitle?: string;
   timestamp: string;
   badgeText?: string;
   badgeColor?: string;
@@ -68,7 +67,7 @@ interface UnifiedHistoryItem {
 function groupItemsByDate(items: UnifiedHistoryItem[]): {
   today: UnifiedHistoryItem[];
   yesterday: UnifiedHistoryItem[];
-  older: UnifiedHistoryItem[];
+  earlier: UnifiedHistoryItem[];
 } {
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -76,20 +75,21 @@ function groupItemsByDate(items: UnifiedHistoryItem[]): {
 
   const today: UnifiedHistoryItem[] = [];
   const yesterday: UnifiedHistoryItem[] = [];
-  const older: UnifiedHistoryItem[] = [];
+  const earlier: UnifiedHistoryItem[] = [];
 
   items.forEach((item) => {
     const itemTime = new Date(item.timestamp).getTime();
-    if (isNaN(itemTime) || itemTime >= todayStart) {
+    if (isNaN(itemTime)) return;
+    if (itemTime >= todayStart) {
       today.push(item);
     } else if (itemTime >= yesterdayStart) {
       yesterday.push(item);
     } else {
-      older.push(item);
+      earlier.push(item);
     }
   });
 
-  return { today, yesterday, older };
+  return { today, yesterday, earlier };
 }
 
 export default function HistoryView(props: HistoryViewProps) {
@@ -104,9 +104,8 @@ export default function HistoryView(props: HistoryViewProps) {
     unifiedItems.push({
       id: `conv_${c.id}`,
       category: "AI",
-      title: c.title || "Conversation Session",
-      subtitle: c.last_message_at ? `Last active: ${new Date(c.last_message_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : undefined,
-      timestamp: c.updated_at || c.created_at || new Date().toISOString(),
+      title: c.title || "Untitled conversation",
+      timestamp: c.updated_at || c.created_at || "",
       badgeText: "AI ASSISTANT",
       badgeColor: "blue",
       rawItem: c
@@ -119,7 +118,6 @@ export default function HistoryView(props: HistoryViewProps) {
       id: `rag_${k.id}`,
       category: "KNOWLEDGE",
       title: k.query,
-      subtitle: k.response ? ("count" in k.response ? `Retrieved ${k.response.count} evidence chunks` : "Document Q&A Analysis") : "Query search",
       timestamp: k.timestamp,
       badgeText: "KNOWLEDGE",
       badgeColor: "cyan",
@@ -133,7 +131,6 @@ export default function HistoryView(props: HistoryViewProps) {
       id: `code_${s.id}`,
       category: "CODE",
       title: s.code.split("\n")[0].substring(0, 60) || "Python Execution",
-      subtitle: s.response ? `Exit: ${s.response.exit_code} · Time: ${s.response.duration_ms}ms` : "Sandbox run",
       timestamp: s.timestamp,
       badgeText: "SANDBOX",
       badgeColor: "purple",
@@ -151,7 +148,7 @@ export default function HistoryView(props: HistoryViewProps) {
     return matchesCategory && matchesSearch;
   });
 
-  const { today, yesterday, older } = groupItemsByDate(filteredItems);
+  const { today, yesterday, earlier } = groupItemsByDate(filteredItems);
 
   const handleClickItem = (item: UnifiedHistoryItem) => {
     if (item.category === "AI") {
@@ -177,12 +174,12 @@ export default function HistoryView(props: HistoryViewProps) {
             {title} ({list.length})
           </Typography.Text>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 gap-2">
           {list.map((item) => (
             <div
               key={item.id}
               onClick={() => handleClickItem(item)}
-              className="p-4 bg-[#0d1322] hover:bg-[#131b2e] border border-slate-800 hover:border-blue-500/50 rounded-xl cursor-pointer transition-all space-y-2 group shadow-sm"
+              className="p-4 bg-[#0d1322] hover:bg-[#131b2e] border border-slate-800 hover:border-blue-500/50 rounded-lg cursor-pointer transition-colors group"
             >
               <div className="flex items-center justify-between">
                 <Tag color={item.badgeColor} className="!mr-0 font-bold text-[10px]">
@@ -198,11 +195,6 @@ export default function HistoryView(props: HistoryViewProps) {
               >
                 {item.title}
               </Typography.Paragraph>
-              {item.subtitle && (
-                <div className="text-xs text-slate-400 font-mono truncate">
-                  {item.subtitle}
-                </div>
-              )}
             </div>
           ))}
         </div>
@@ -219,7 +211,7 @@ export default function HistoryView(props: HistoryViewProps) {
             Workspace History
           </Typography.Title>
           <Typography.Paragraph className="!mb-0 text-slate-400 text-sm">
-            Unified chronological access to your AI conversations, knowledge queries, and sandbox executions.
+            A unified timeline of your authorized workspace activity.
           </Typography.Paragraph>
         </div>
         <Space wrap>
@@ -268,7 +260,7 @@ export default function HistoryView(props: HistoryViewProps) {
           </Radio.Group>
 
           <Input
-            placeholder="Search history items..."
+            placeholder="Search history..."
             prefix={<SearchOutlined />}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -286,7 +278,7 @@ export default function HistoryView(props: HistoryViewProps) {
             description={
               searchQuery
                 ? `No history items matching "${searchQuery}".`
-                : "No workspace history recorded yet."
+                : "No activity yet."
             }
           />
         </Card>
@@ -294,7 +286,7 @@ export default function HistoryView(props: HistoryViewProps) {
         <div>
           {renderSection("Today", today)}
           {renderSection("Yesterday", yesterday)}
-          {renderSection("Older", older)}
+          {renderSection("Earlier", earlier)}
         </div>
       )}
     </div>

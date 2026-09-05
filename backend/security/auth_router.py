@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from backend.security.database import get_db
@@ -5,7 +6,8 @@ from backend.security.auth import hash_password, verify_password, create_access_
 from backend.security.models import (
     UserRegister, UserResponse, TokenResponse,
     UserProvisionRequest, UserStatusRequest, UserRoleRequest,
-    PasswordResetRequest, ChangePasswordRequest
+    UserDepartmentUpdateRequest, PasswordResetRequest, ChangePasswordRequest,
+    DepartmentCreate, DepartmentUpdate, DepartmentResponse
 )
 from backend.security.dependencies import get_current_user, RoleChecker
 from backend.security.audit import AuditLogger
@@ -40,11 +42,28 @@ async def register(payload: UserRegister, db: sqlite3.Connection = Depends(get_d
     else:
         role = "admin" if "admin" in payload.username.lower() else "user"
     
+    # Resolve department
+    dept_id = payload.department_id
+    dept_name = None
+    if dept_id:
+        cursor.execute("SELECT id, name FROM departments WHERE id = ?", (dept_id,))
+        d_row = cursor.fetchone()
+        if d_row:
+            dept_id = d_row[0]
+            dept_name = d_row[1]
+    if not dept_id:
+        default_dept = "Administration" if role == "admin" else "Operations"
+        cursor.execute("SELECT id, name FROM departments WHERE name = ?", (default_dept,))
+        d_row = cursor.fetchone()
+        if d_row:
+            dept_id = d_row[0]
+            dept_name = d_row[1]
+
     try:
         hashed = hash_password(payload.password)
         cursor.execute(
-            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-            (payload.username, hashed, role)
+            "INSERT INTO users (username, password_hash, role, department_id, department_name) VALUES (?, ?, ?, ?, ?)",
+            (payload.username, hashed, role, dept_id, dept_name)
         )
         db.commit()
         
@@ -55,7 +74,7 @@ async def register(payload: UserRegister, db: sqlite3.Connection = Depends(get_d
             component="security.auth_router",
             status="success",
             username=payload.username,
-            metadata={"username": payload.username, "role": role}
+            metadata={"username": payload.username, "role": role, "department_name": dept_name}
         )
         return dict(user)
     except ValueError as ve:
@@ -244,10 +263,26 @@ async def provision_user(
             detail="Username already exists"
         )
     
+    dept_id = payload.department_id
+    dept_name = None
+    if dept_id:
+        cursor.execute("SELECT id, name FROM departments WHERE id = ?", (dept_id,))
+        d_row = cursor.fetchone()
+        if d_row:
+            dept_id = d_row[0]
+            dept_name = d_row[1]
+    if not dept_id:
+        default_dept = "Administration" if payload.role == "admin" else "Operations"
+        cursor.execute("SELECT id, name FROM departments WHERE name = ?", (default_dept,))
+        d_row = cursor.fetchone()
+        if d_row:
+            dept_id = d_row[0]
+            dept_name = d_row[1]
+
     hashed = hash_password(payload.password)
     cursor.execute(
-        "INSERT INTO users (username, password_hash, role, must_change_password) VALUES (?, ?, ?, 1)",
-        (payload.username, hashed, payload.role)
+        "INSERT INTO users (username, password_hash, role, department_id, department_name, must_change_password) VALUES (?, ?, ?, ?, ?, 1)",
+        (payload.username, hashed, payload.role, dept_id, dept_name)
     )
     db.commit()
     
@@ -259,16 +294,60 @@ async def provision_user(
         component="security.auth_router",
         status="success",
         username=payload.username,
-        metadata={"username": payload.username, "role": payload.role}
+        metadata={"username": payload.username, "role": payload.role, "department_name": dept_name}
     )
     AuditLogger.log_event(
         action="USER_CREATED",
         component="security.auth_router",
         status="success",
         username=payload.username,
-        metadata={"username": payload.username, "role": payload.role}
+        metadata={"username": payload.username, "role": payload.role, "department_name": dept_name}
     )
     return dict(new_user)
+
+@router.patch("/users/{target_username}/department", response_model=UserResponse)
+async def update_user_department(
+    target_username: str,
+    payload: UserDepartmentUpdateRequest,
+    current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
+    db: sqlite3.Connection = Depends(get_db)
+):
+    """Assigns or changes a user's department. Admin only."""
+    cursor = db.cursor()
+    cursor.execute("SELECT id, name FROM departments WHERE id = ?", (payload.department_id,))
+    dept_row = cursor.fetchone()
+    if not dept_row:
+        raise HTTPException(status_code=404, detail="Department not found")
+    dept_name = dept_row[1]
+
+    cursor.execute("SELECT id, department_name FROM users WHERE username = ?", (target_username,))
+    user = cursor.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    old_dept = user[1]
+    cursor.execute(
+        "UPDATE users SET department_id = ?, department_name = ? WHERE username = ?",
+        (payload.department_id, dept_name, target_username)
+    )
+    db.commit()
+
+    cursor.execute("SELECT * FROM users WHERE username = ?", (target_username,))
+    updated = cursor.fetchone()
+
+    AuditLogger.log_event(
+        action="USER_DEPARTMENT_CHANGED",
+        component="security.auth_router",
+        status="success",
+        username=target_username,
+        metadata={
+            "username": target_username,
+            "department_id": payload.department_id,
+            "department_name": dept_name,
+            "previous_department": old_dept
+        }
+    )
+    return dict(updated)
 
 @router.post("/users/{target_username}/status", response_model=UserResponse)
 async def update_user_status(
@@ -390,3 +469,131 @@ async def admin_reset_password(
         metadata={"username": target_username}
     )
     return dict(updated)
+
+# =========================================================================
+# Department Management Endpoints (Admin Controlled)
+# =========================================================================
+
+@router.get("/departments", response_model=list[DepartmentResponse], tags=["Department Management"])
+async def list_departments(
+    current_user: sqlite3.Row = Depends(get_current_user),
+    db: sqlite3.Connection = Depends(get_db)
+):
+    """Lists all configured departments with actual user and document counts from SQLite database."""
+    cursor = db.cursor()
+    cursor.execute("""
+        SELECT d.id, d.name, d.description, d.is_active, d.created_at, d.updated_at,
+               (SELECT COUNT(*) FROM users u WHERE u.department_id = d.id AND u.is_active = 1) AS user_count,
+               (SELECT COUNT(*) FROM documents doc WHERE doc.owner_department_id = d.id AND doc.status = 'indexed') AS document_count
+        FROM departments d
+        ORDER BY d.id ASC
+    """)
+    rows = cursor.fetchall()
+    return [dict(r) for r in rows]
+
+@router.post("/departments", response_model=DepartmentResponse, status_code=status.HTTP_201_CREATED, tags=["Department Management"])
+async def create_department(
+    payload: DepartmentCreate,
+    current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
+    db: sqlite3.Connection = Depends(get_db)
+):
+    """Creates a new organizational department. Restricted to administrators."""
+    clean_name = payload.name.strip()
+    cursor = db.cursor()
+    cursor.execute("SELECT id FROM departments WHERE LOWER(name) = LOWER(?)", (clean_name,))
+    if cursor.fetchone():
+        raise HTTPException(status_code=400, detail="Department name already exists")
+
+    now_str = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        "INSERT INTO departments (name, description, is_active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+        (clean_name, (payload.description or "").strip(), now_str, now_str)
+    )
+    db.commit()
+    dept_id = cursor.lastrowid
+    
+    cursor.execute("""
+        SELECT d.id, d.name, d.description, d.is_active, d.created_at, d.updated_at,
+               0 AS user_count, 0 AS document_count
+        FROM departments d WHERE d.id = ?
+    """, (dept_id,))
+    new_dept = cursor.fetchone()
+
+    AuditLogger.log_event(
+        action="DEPARTMENT_CREATED",
+        component="security.auth_router",
+        status="success",
+        resource=clean_name,
+        metadata={"department_id": dept_id, "department_name": clean_name}
+    )
+    return dict(new_dept)
+
+@router.patch("/departments/{id}", response_model=DepartmentResponse, tags=["Department Management"])
+async def update_department(
+    id: int,
+    payload: DepartmentUpdate,
+    current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
+    db: sqlite3.Connection = Depends(get_db)
+):
+    """Renames, updates description, or activates/deactivates a department. Admin only."""
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM departments WHERE id = ?", (id,))
+    dept = cursor.fetchone()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+
+    updates = []
+    params = []
+    if payload.name is not None:
+        clean_name = payload.name.strip()
+        cursor.execute("SELECT id FROM departments WHERE LOWER(name) = LOWER(?) AND id != ?", (clean_name, id))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Department name already exists")
+        updates.append("name = ?")
+        params.append(clean_name)
+    if payload.description is not None:
+        updates.append("description = ?")
+        params.append(payload.description.strip())
+    if payload.is_active is not None:
+        updates.append("is_active = ?")
+        params.append(1 if payload.is_active else 0)
+
+    now_str = datetime.now(timezone.utc).isoformat()
+    updates.append("updated_at = ?")
+    params.append(now_str)
+    params.append(id)
+
+    cursor.execute(f"UPDATE departments SET {', '.join(updates)} WHERE id = ?", params)
+    
+    if payload.name is not None:
+        clean_name = payload.name.strip()
+        cursor.execute("UPDATE users SET department_name = ? WHERE department_id = ?", (clean_name, id))
+        cursor.execute("UPDATE documents SET owner_department_name = ? WHERE owner_department_id = ?", (clean_name, id))
+    db.commit()
+
+    cursor.execute("""
+        SELECT d.id, d.name, d.description, d.is_active, d.created_at, d.updated_at,
+               (SELECT COUNT(*) FROM users u WHERE u.department_id = d.id AND u.is_active = 1) AS user_count,
+               (SELECT COUNT(*) FROM documents doc WHERE doc.owner_department_id = d.id AND doc.status = 'indexed') AS document_count
+        FROM departments d
+        WHERE d.id = ?
+    """, (id,))
+    updated_dept = cursor.fetchone()
+
+    audit_action = "DEPARTMENT_DEACTIVATED" if (payload.is_active is False) else "DEPARTMENT_UPDATED"
+    AuditLogger.log_event(
+        action=audit_action,
+        component="security.auth_router",
+        status="success",
+        resource=updated_dept["name"],
+        metadata={"department_id": id, "department_name": updated_dept["name"]}
+    )
+    return dict(updated_dept)
+
+# Create departments_router with root-level paths for /departments and /users/{username}/department
+departments_router = APIRouter(tags=["Department Management"])
+departments_router.add_api_route("/departments", list_departments, methods=["GET"], response_model=list[DepartmentResponse])
+departments_router.add_api_route("/departments", create_department, methods=["POST"], response_model=DepartmentResponse, status_code=status.HTTP_201_CREATED)
+departments_router.add_api_route("/departments/{id}", update_department, methods=["PATCH"], response_model=DepartmentResponse)
+departments_router.add_api_route("/users/{target_username}/department", update_user_department, methods=["PATCH"], response_model=UserResponse)
+

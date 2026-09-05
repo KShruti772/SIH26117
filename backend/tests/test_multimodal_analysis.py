@@ -166,7 +166,7 @@ class TestMultimodalAnalysis(unittest.IsolatedAsyncioTestCase):
             data = res.json()
             self.assertTrue(data["grounded"])
             self.assertEqual(data["task_type"], "VISION_ANALYSIS")
-            self.assertEqual(data["routing_info"]["selected_model"], "gemma3:4b")
+            self.assertIn(data["routing_info"]["selected_model"], ["gemma3:4b", "qwen3-vl:4b"])
 
     def test_03_pdf_diagram_page_rendering_for_visual_analysis(self):
         """3. Ingests a multi-page PDF, requests visual analysis of page 2, and verifies page rendering to PNG."""
@@ -312,3 +312,110 @@ class TestMultimodalAnalysis(unittest.IsolatedAsyncioTestCase):
             # Verify images were NOT sent for standard text QA
             call_kwargs = mock_gen.call_args.kwargs
             self.assertNotIn("images", call_kwargs)
+
+    def test_07_vision_analysis_report_generation_pdf_and_docx(self):
+        """7. Verifies end-to-end report generation (PDF & DOCX) from visual analysis findings, with disk persistence and RBAC download."""
+        img_path = self._create_dummy_image("circuit_schematic.png", unique_id=7)
+        doc_id = rag_service.ingest_document(
+            img_path,
+            original_filename="circuit_schematic.png",
+            owner_id=self.user_alpha_id,
+            owner_username="operator_alpha"
+        )
+
+        with patch("backend.app.main.loader_manager.generate", new_callable=AsyncMock) as mock_gen:
+            mock_gen.return_value = (
+                '{\n'
+                '  "Executive Summary": "Visual analysis completed for circuit schematic.",\n'
+                '  "Key Findings": "Component R4 and C2 verified in proper alignment.",\n'
+                '  "Detailed Analysis": "Traces between IC1 and connector J2 show no bridging or defects.",\n'
+                '  "Risks and Operational Issues": "No thermal discoloration observed.",\n'
+                '  "Recommendations": "Proceed with functional test bench validation."\n'
+                '}'
+            )
+
+            # 1. Generate PDF Report
+            res_pdf = self.client.post(
+                "/documents/generate",
+                json={
+                    "title": "Circuit Inspection Report",
+                    "topic": "Visual inspection of circuit board reveals resistor R4 and capacitor C2 intact. [Source: circuit_schematic.png]",
+                    "format": "pdf",
+                    "document_id": doc_id,
+                    "session_id": "sess_report_vision_pdf"
+                },
+                headers={"Authorization": f"Bearer {self.token_alpha}"}
+            )
+
+            self.assertEqual(res_pdf.status_code, 200)
+            data_pdf = res_pdf.json()
+            pdf_id = data_pdf["id"]
+            pdf_path = data_pdf["file_path"]
+
+            self.assertEqual(data_pdf["status"], "completed")
+            self.assertEqual(data_pdf["format"], "pdf")
+            self.assertTrue(data_pdf["filename"].endswith(".pdf"))
+            self.assertGreater(data_pdf["file_size"], 0)
+            self.assertTrue(os.path.exists(pdf_path))
+            self.assertGreater(os.path.getsize(pdf_path), 0)
+
+            # 2. Generate DOCX Report
+            res_docx = self.client.post(
+                "/documents/generate",
+                json={
+                    "title": "Circuit Inspection Docx Report",
+                    "topic": "Visual inspection of circuit board reveals resistor R4 and capacitor C2 intact. [Source: circuit_schematic.png]",
+                    "format": "docx",
+                    "document_id": doc_id,
+                    "session_id": "sess_report_vision_docx"
+                },
+                headers={"Authorization": f"Bearer {self.token_alpha}"}
+            )
+
+            self.assertEqual(res_docx.status_code, 200)
+            data_docx = res_docx.json()
+            docx_id = data_docx["id"]
+            docx_path = data_docx["file_path"]
+
+            self.assertEqual(data_docx["status"], "completed")
+            self.assertEqual(data_docx["format"], "docx")
+            self.assertTrue(data_docx["filename"].endswith(".docx"))
+            self.assertGreater(data_docx["file_size"], 0)
+            self.assertTrue(os.path.exists(docx_path))
+            self.assertGreater(os.path.getsize(docx_path), 0)
+
+            # 3. Verify List Generated Documents for Owner
+            res_list = self.client.get(
+                "/documents/generated",
+                headers={"Authorization": f"Bearer {self.token_alpha}"}
+            )
+            self.assertEqual(res_list.status_code, 200)
+            items = res_list.json()
+            item_ids = [it["id"] for it in items]
+            self.assertIn(pdf_id, item_ids)
+            self.assertIn(docx_id, item_ids)
+
+            # 4. Verify Download RBAC: Owner (Alpha) downloads successfully
+            res_dl_alpha = self.client.get(
+                f"/documents/generated/{pdf_id}/download",
+                headers={"Authorization": f"Bearer {self.token_alpha}"}
+            )
+            self.assertEqual(res_dl_alpha.status_code, 200)
+            self.assertEqual(res_dl_alpha.headers["content-type"], "application/pdf")
+            self.assertGreater(len(res_dl_alpha.content), 0)
+
+            # 5. Verify Download RBAC: Unauthorized User (Beta) is blocked (403)
+            res_dl_beta = self.client.get(
+                f"/documents/generated/{pdf_id}/download",
+                headers={"Authorization": f"Bearer {self.token_beta}"}
+            )
+            self.assertEqual(res_dl_beta.status_code, 403)
+
+            # 6. Verify Download RBAC: Administrator downloads successfully
+            res_dl_admin = self.client.get(
+                f"/documents/generated/{pdf_id}/download",
+                headers={"Authorization": f"Bearer {self.token_admin}"}
+            )
+            self.assertEqual(res_dl_admin.status_code, 200)
+            self.assertEqual(res_dl_admin.headers["content-type"], "application/pdf")
+

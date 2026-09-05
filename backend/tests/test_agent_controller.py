@@ -78,7 +78,7 @@ class TestAgentController(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res["success"])
         self.assertEqual(res["plan"]["status"], "COMPLETED")
         self.assertEqual(self.mock_sandbox.execute.call_count, 1)
-        self.mock_loader.switch_model.assert_any_call("gemma3:4b")
+        self.mock_loader.switch_model.assert_any_call("qwen2.5-coder:7b")
 
     async def test_verification_callback_fail_triggers_replan(self):
         """Verify step verification failures trigger dynamic replan retry steps."""

@@ -13,7 +13,12 @@ import {
   FileText, 
   Terminal, 
   Hash, 
-  Layers
+  Layers,
+  Lock,
+  Bot,
+  FileCode,
+  AlertTriangle,
+  FileCheck
 } from "lucide-react";
 import { AuditLog } from "../../lib/api/audit";
 
@@ -35,6 +40,7 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   DOCUMENT_INDEX_STARTED: "Vector embedding generation and indexing initiated.",
   DOCUMENT_INDEX_COMPLETED: "Document indexed into local ChromaDB vector repository.",
   DOCUMENT_INDEX_FAILED: "Document indexing encountered an unrecoverable parsing error.",
+  DOCUMENT_DUPLICATE_DETECTED: "Content deduplication check identified an identical document.",
   RAG_QUERY: "Grounded query processed against confidential organizational knowledge.",
   RAG_QUERY_STARTED: "Grounded semantic retrieval and query pipeline started.",
   RAG_QUERY_COMPLETED: "Grounded question-answering completed with citation evidence.",
@@ -48,13 +54,21 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   DOCUMENT_DOWNLOAD_STARTED: "Document download request authorized and streaming started.",
   DOCUMENT_DOWNLOAD_COMPLETED: "Document binary stream transmitted successfully.",
   SANDBOX_EXECUTION: "Isolated subprocess code sandbox execution completed.",
+  SANDBOX_EXECUTION_STARTED: "Isolated code sandbox execution initiated in restricted subprocess.",
+  SANDBOX_EXECUTION_COMPLETED: "Sandbox execution completed successfully with exit code 0.",
+  SANDBOX_EXECUTION_FAILED: "Sandbox execution terminated with error or non-zero exit code.",
+  SANDBOX_FILE_CREATED: "New file written into isolated sandbox storage.",
   MODEL_LOAD: "Open-weight model loaded into local compute runtime.",
   MODEL_UNLOAD: "Model released and VRAM deallocated.",
   MODEL_SWITCH: "Dynamic local model switch executed.",
+  MODEL_INFERENCE: "Open-weight multimodal model inference executed locally on-premise.",
+  MODEL_ROUTED: "Task routed to optimal open-weight model based on required capabilities.",
   VERIFICATION: "Grounding and anti-hallucination verification evaluated.",
   USER_PROVISIONED: "User account provisioned into authoritative auth registry.",
   USER_CREATED: "User credentials and RBAC role created in SQLite database.",
   AUTHORIZATION_DENIED: "Action blocked by Role-Based Access Control policy.",
+  AUTHORIZATION_FAILURE: "Access request denied due to insufficient permissions or ownership mismatch.",
+  DOCUMENT_ACCESS_DENIED: "Confidential document access denied by sovereign ACL policy.",
 };
 
 export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDrawerProps) {
@@ -77,15 +91,24 @@ export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDra
     }
   }
 
+  const hasMetadata = Object.keys(parsedMetadata).length > 0;
   const isSuccess = log.status === "success";
   const actionDescription = ACTION_DESCRIPTIONS[log.action];
+
+  // Forensic classification helpers
+  const isDocGen = log.action.includes("DOCUMENT_GENERAT") || parsedMetadata["document_id"] != null;
+  const isDocDownload = log.action.includes("DOCUMENT_DOWNLOAD");
+  const isDuplicate = log.action.includes("DUPLICATE") || parsedMetadata["content_hash"] != null;
+  const isModelInference = log.action.includes("MODEL_INFERENCE") || parsedMetadata["model"] != null;
+  const isSandbox = log.action.includes("SANDBOX") || parsedMetadata["run_id"] != null;
+  const isAuthFailure = log.action.includes("AUTHORIZATION") || log.action.includes("ACCESS_DENIED") || parsedMetadata["result"] === "denied";
 
   return (
     <Drawer
       open={open}
       onClose={onClose}
       placement="right"
-      width={typeof window !== "undefined" && window.innerWidth < 768 ? "100%" : 780}
+      size={typeof window !== "undefined" && window.innerWidth < 768 ? "100%" : 800}
       closable={true}
       title={
         <div className="flex items-center justify-between gap-3 pr-2">
@@ -127,7 +150,7 @@ export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDra
       footer={
         <div className="flex items-center justify-between">
           <span className="text-xs text-slate-450 font-mono">
-            Immutable SQLite Ledger Record
+            Immutable SQLite Ledger Record • Confidential Forensic View
           </span>
           <Button
             type="primary"
@@ -163,7 +186,7 @@ export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDra
           )}
         </div>
 
-        {/* Section 1: Event Details Grid */}
+        {/* Section 1: Event Specification Grid */}
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400 border-b border-white/5 pb-1.5">
             <Layers className="h-3.5 w-3.5 text-blue-400" />
@@ -258,7 +281,7 @@ export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDra
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400 border-b border-white/5 pb-1.5">
             <Cpu className="h-3.5 w-3.5 text-emerald-400" />
-            <span>Execution & Routing Context</span>
+            <span>Execution & Correlation Context</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
             <div className="p-3.5 rounded-lg bg-[#0c1220] border border-white/5 space-y-1">
@@ -282,7 +305,7 @@ export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDra
             <div className="md:col-span-2 p-3.5 rounded-lg bg-[#0c1220] border border-white/5 space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-450">
-                  Request ID
+                  Request / Correlation ID
                 </span>
                 {log.request_id && (
                   <Button
@@ -303,7 +326,278 @@ export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDra
           </div>
         </div>
 
-        {/* Section 4: Execution Output Details (if present) */}
+        {/* Section 4: Structured Forensic Details */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-slate-400 border-b border-white/5 pb-1.5">
+            <div className="flex items-center gap-2">
+              <FileCheck className="h-3.5 w-3.5 text-cyan-400" />
+              <span>Forensic Audit Details</span>
+            </div>
+            {hasMetadata && (
+              <Tag color="blue" className="text-[10px] uppercase font-mono">
+                {Object.keys(parsedMetadata).length} attributes
+              </Tag>
+            )}
+          </div>
+
+          {!hasMetadata ? (
+            <div className="p-4 rounded-lg bg-[#0c1220] border border-white/5 text-sm text-slate-400 italic">
+              No additional details recorded.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {/* Highlight Cards for Common Forensic Event Types */}
+              {isDocGen && (
+                <div className="p-3.5 rounded-lg bg-blue-950/20 border border-blue-500/20 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase text-blue-400">
+                    <FileText className="h-3.5 w-3.5" />
+                    <span>Document Generation Intelligence</span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                    {parsedMetadata["document_id"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Document ID:</span>
+                        <span className="font-mono text-slate-200 font-semibold">{String(parsedMetadata["document_id"])}</span>
+                      </div>
+                    )}
+                    {parsedMetadata["artifact_id"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Artifact ID:</span>
+                        <span className="font-mono text-slate-200 font-semibold">{String(parsedMetadata["artifact_id"])}</span>
+                      </div>
+                    )}
+                    {(parsedMetadata["output_format"] != null || parsedMetadata["format"] != null) && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Format:</span>
+                        <Tag color="cyan" className="font-mono font-bold uppercase text-[10px] mt-0.5">
+                          {String(parsedMetadata["output_format"] || parsedMetadata["format"])}
+                        </Tag>
+                      </div>
+                    )}
+                    {parsedMetadata["file_size"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">File Size:</span>
+                        <span className="font-mono text-slate-200">{Number(parsedMetadata["file_size"]).toLocaleString()} bytes</span>
+                      </div>
+                    )}
+                    {parsedMetadata["source_count"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Sources Cited:</span>
+                        <span className="font-mono text-slate-200">{String(parsedMetadata["source_count"])} sources</span>
+                      </div>
+                    )}
+                    {parsedMetadata["conversation_id"] != null && String(parsedMetadata["conversation_id"]) !== "" && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Conversation ID:</span>
+                        <span className="font-mono text-slate-200">{String(parsedMetadata["conversation_id"])}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {isDocDownload && (
+                <div className="p-3.5 rounded-lg bg-teal-950/20 border border-teal-500/20 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase text-teal-400">
+                    <FileCheck className="h-3.5 w-3.5" />
+                    <span>Download Operation Details</span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                    {parsedMetadata["artifact_id"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Artifact ID:</span>
+                        <span className="font-mono text-slate-200 font-semibold">{String(parsedMetadata["artifact_id"])}</span>
+                      </div>
+                    )}
+                    {(parsedMetadata["output_format"] != null || parsedMetadata["format"] != null) && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Format:</span>
+                        <Tag color="geekblue" className="font-mono uppercase text-[10px] mt-0.5">
+                          {String(parsedMetadata["output_format"] || parsedMetadata["format"])}
+                        </Tag>
+                      </div>
+                    )}
+                    {parsedMetadata["file_size"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Transmitted Size:</span>
+                        <span className="font-mono text-slate-200">{Number(parsedMetadata["file_size"]).toLocaleString()} bytes</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {isDuplicate && (
+                <div className="p-3.5 rounded-lg bg-amber-950/20 border border-amber-500/20 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase text-amber-400">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    <span>Deduplication & Cryptographic Verification</span>
+                  </div>
+                  <div className="space-y-1.5 text-xs">
+                    {parsedMetadata["content_hash"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Content SHA-256 Hash:</span>
+                        <div className="font-mono text-xs text-amber-300 select-all break-all bg-black/40 p-1.5 rounded border border-amber-500/10">
+                          {String(parsedMetadata["content_hash"])}
+                        </div>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      {parsedMetadata["result"] != null && (
+                        <div>
+                          <span className="text-slate-400 block text-[10px]">Deduplication Result:</span>
+                          <Tag color="warning" className="font-mono text-[10px]">{String(parsedMetadata["result"])}</Tag>
+                        </div>
+                      )}
+                      {(parsedMetadata["canonical_document_id"] != null || parsedMetadata["document_id"] != null) && (
+                        <div>
+                          <span className="text-slate-400 block text-[10px]">Canonical Document:</span>
+                          <span className="font-mono text-slate-200">{String(parsedMetadata["canonical_document_id"] || parsedMetadata["document_id"])}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {isModelInference && (
+                <div className="p-3.5 rounded-lg bg-purple-950/20 border border-purple-500/20 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase text-purple-400">
+                    <Bot className="h-3.5 w-3.5" />
+                    <span>Model Inference Telemetry</span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                    {(parsedMetadata["model"] != null || parsedMetadata["model_id"] != null) && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Model:</span>
+                        <Tag color="purple" className="font-mono font-bold text-[10px] mt-0.5">
+                          {String(parsedMetadata["model"] || parsedMetadata["model_id"])}
+                        </Tag>
+                      </div>
+                    )}
+                    {parsedMetadata["task_type"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Task Type:</span>
+                        <span className="font-mono text-slate-200">{String(parsedMetadata["task_type"])}</span>
+                      </div>
+                    )}
+                    {parsedMetadata["duration_ms"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Latency:</span>
+                        <span className="font-mono text-slate-200">{String(parsedMetadata["duration_ms"])} ms</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {isSandbox && (
+                <div className="p-3.5 rounded-lg bg-emerald-950/20 border border-emerald-500/20 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase text-emerald-400">
+                    <FileCode className="h-3.5 w-3.5" />
+                    <span>Sandbox Subprocess Telemetry</span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    {(parsedMetadata["run_id"] != null || parsedMetadata["execution_id"] != null) && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Run ID:</span>
+                        <span className="font-mono text-slate-200 font-semibold">{String(parsedMetadata["run_id"] || parsedMetadata["execution_id"])}</span>
+                      </div>
+                    )}
+                    {parsedMetadata["exit_code"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Exit Code:</span>
+                        <Tag color={parsedMetadata["exit_code"] === 0 ? "success" : "error"} className="font-mono text-[10px]">
+                          {String(parsedMetadata["exit_code"])}
+                        </Tag>
+                      </div>
+                    )}
+                    {parsedMetadata["duration_ms"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Duration:</span>
+                        <span className="font-mono text-slate-200">{String(parsedMetadata["duration_ms"])} ms</span>
+                      </div>
+                    )}
+                    {parsedMetadata["result"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Result:</span>
+                        <Tag color={parsedMetadata["result"] === "success" ? "success" : "error"} className="font-mono uppercase text-[10px]">
+                          {String(parsedMetadata["result"])}
+                        </Tag>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {isAuthFailure && (
+                <div className="p-3.5 rounded-lg bg-rose-950/20 border border-rose-500/20 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase text-rose-400">
+                    <Lock className="h-3.5 w-3.5" />
+                    <span>Security Authorization Failure</span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                    {parsedMetadata["resource_type"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Resource Type:</span>
+                        <span className="font-mono text-slate-200 font-semibold">{String(parsedMetadata["resource_type"])}</span>
+                      </div>
+                    )}
+                    {parsedMetadata["resource_id"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Resource ID:</span>
+                        <span className="font-mono text-slate-200">{String(parsedMetadata["resource_id"])}</span>
+                      </div>
+                    )}
+                    {parsedMetadata["action"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Attempted Action:</span>
+                        <Tag color="volcano" className="font-mono uppercase text-[10px]">{String(parsedMetadata["action"])}</Tag>
+                      </div>
+                    )}
+                    {parsedMetadata["result"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Result:</span>
+                        <Tag color="error" className="font-mono uppercase text-[10px]">{String(parsedMetadata["result"])}</Tag>
+                      </div>
+                    )}
+                    {parsedMetadata["reason"] != null && (
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Denial Reason:</span>
+                        <span className="font-mono text-rose-300">{String(parsedMetadata["reason"])}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Complete Structured Details Table / JSON */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-450">
+                    Structured Attributes Payload
+                  </span>
+                  {log.metadata_json && (
+                    <Button
+                      type="text"
+                      size="small"
+                      onClick={() => copyToClipboard(log.metadata_json || "", "metadata")}
+                      icon={copiedField === "metadata" ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3 text-slate-400" />}
+                      className="text-[10px] text-slate-400 hover:text-slate-200 h-6 px-1.5"
+                    >
+                      {copiedField === "metadata" ? "Copied JSON" : "Copy JSON"}
+                    </Button>
+                  )}
+                </div>
+                <pre className="p-3.5 bg-[#05070c] border border-white/10 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-[220px]">
+                  {JSON.stringify(parsedMetadata, null, 2)}
+                </pre>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Section 5: Execution Output Details (stdout/stderr if present) */}
         {(["stdout", "stderr", "error"] as const).some((k) => parsedMetadata[k] != null) && (
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400 border-b border-white/5 pb-1.5">
@@ -325,36 +619,6 @@ export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDra
             })}
           </div>
         )}
-
-        {/* Section 5: Record Metadata */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-slate-400 border-b border-white/5 pb-1.5">
-            <div className="flex items-center gap-2">
-              <FileText className="h-3.5 w-3.5 text-cyan-400" />
-              <span>Record Metadata Payload</span>
-            </div>
-            {log.metadata_json && (
-              <Button
-                type="text"
-                size="small"
-                onClick={() => copyToClipboard(log.metadata_json || "", "metadata")}
-                icon={copiedField === "metadata" ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3 text-slate-400" />}
-                className="text-[10px] text-slate-400 hover:text-slate-200 h-6 px-1.5"
-              >
-                {copiedField === "metadata" ? "Copied" : "Copy JSON"}
-              </Button>
-            )}
-          </div>
-          {log.metadata_json ? (
-            <pre className="p-3.5 bg-[#05070c] border border-white/10 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-[220px]">
-              {JSON.stringify(parsedMetadata, null, 2)}
-            </pre>
-          ) : (
-            <div className="p-3.5 rounded-lg bg-[#0c1220] border border-white/5 text-xs text-slate-500 italic">
-              No structured metadata payload recorded for this event.
-            </div>
-          )}
-        </div>
 
         {/* Section 6: Cryptographic Integrity */}
         <div className="space-y-3">

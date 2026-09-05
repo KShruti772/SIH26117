@@ -1,16 +1,24 @@
-from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Any, List, Dict
 import uuid
 import logging
 from backend.app.config.settings import settings
-from backend.security.database import init_db
-from backend.security.auth_router import router as auth_router
+from backend.security.database import init_db, get_db_path
+from backend.security.auth_router import router as auth_router, departments_router
 from backend.security.audit import request_id_var, AuditLogger, get_request_id
 from backend.security.dependencies import RoleChecker, get_current_user
+from backend.security.models import DocumentShareRequest
+from backend.security.access_control import (
+    can_access_document,
+    get_accessible_document_ids,
+    can_access_generated_document,
+    _extract_user_attrs
+)
 from pydantic import BaseModel, Field, model_validator
 import os
+import sqlite3
 
 from backend.models.registry.manager import ModelRegistryManager
 from backend.models.loaders.manager import ModelLoaderManager, RuntimeUnavailableError
@@ -56,11 +64,22 @@ grounded_qa_service = GroundedQAService(
     model_router=model_router
 )
 
+from backend.tools.document_generators.generators import DocxGenerator, XlsxGenerator, PdfGenerator
+docx_generator = DocxGenerator()
+xlsx_generator = XlsxGenerator()
+pdf_generator = PdfGenerator()
+doc_generators = {
+    "docx": docx_generator,
+    "xlsx": xlsx_generator,
+    "pdf": pdf_generator
+}
+
 agent_controller = AgentController(
     registry_manager=registry_manager,
     loader_manager=loader_manager,
     rag_service=rag_service,
     sandbox_service=sandbox_service,
+    doc_generators=doc_generators,
     model_router=model_router,
     verify_callback=verify_callback
 )
@@ -96,6 +115,7 @@ async def add_request_id_header(request: Request, call_next):
         request_id_var.reset(token)
 
 app.include_router(auth_router)
+app.include_router(departments_router)
 
 class ChatRequest(BaseModel):
     message: Optional[str] = Field(default=None, max_length=1000)
@@ -470,7 +490,7 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             for message in recent_messages[-6:]
             if message.get("content", "").strip()
         ]
-        res = await agent_controller.run(user_prompt, current_user=current_user)
+        res = await agent_controller.run(user_prompt, current_user=current_user, conversation_id=session_id)
         
         is_rag = res.get("rag_used", False)
         sources = res.get("sources", [])
@@ -523,6 +543,17 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
         routing_reason = routing_data.get("reason", f"Automatically routed to {selected_model}")
 
         sandbox_exec = res.get("sandbox_execution")
+        plan_steps = res.get("plan", {}).get("steps", []) if isinstance(res.get("plan"), dict) else []
+        last_step_replans = plan_steps[-1].get("replan_count", 0) if plan_steps and isinstance(plan_steps[-1], dict) else 0
+
+        execution_data = res.get("execution") or {
+            "status": "SUCCESS" if res.get("success") else "FAILED",
+            "tools_used": [],
+            "sandbox": sandbox_exec,
+            "verification": verification,
+            "replan_count": last_step_replans
+        }
+
         assistant_meta = {
             "task_type": task_type,
             "selected_model": selected_model,
@@ -534,7 +565,11 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             "document_ids": doc_ids,
             "category": res.get("category"),
             "duration_ms": res.get("duration_ms"),
-            "sandbox_execution": sandbox_exec
+            "sandbox_execution": sandbox_exec,
+            "execution": execution_data,
+            "replan_count": execution_data.get("replan_count", 0),
+            "context_telemetry": res.get("context_telemetry"),
+            "context_package": res.get("context_package")
         }
 
         # Persist assistant output to local database session
@@ -575,12 +610,15 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
         return {
             "success": res.get("success", False),
             "status": "success" if res.get("success") else "failure",
+            "category": res.get("category"),
             "model": selected_model,
             "answer": answer,
             "rag_used": is_rag,
             "sources": sources,
             "session_id": session_id,
             "plan": res.get("plan"),
+            "state": res.get("state"),
+            "execution": execution_data,
             "verification": verification,
             "request_id": req_id,
             "duration_ms": res.get("duration_ms"),
@@ -751,43 +789,65 @@ async def root():
 
 @app.get("/documents", tags=["RAG Operations"])
 async def get_documents(current_user = Depends(get_current_user)):
-    """Retrieves all indexed documents in the local vector store, enforcing ownership boundaries."""
-    is_admin = _get_user_val(current_user, "role") == "admin"
-    curr_id = _get_user_val(current_user, "id")
-    docs = rag_service.list_documents(owner_id=curr_id, is_admin=is_admin)
+    """Retrieves all indexed documents in the local vector store, enforcing enterprise access control."""
+    accessible_ids = get_accessible_document_ids(current_user, permission="READ")
+    docs = rag_service.list_documents(accessible_document_ids=accessible_ids)
     filtered = []
     for d in docs:
         if d.get("is_mock", False):
             continue
-        doc_owner_id = d.get("owner_id")
-        if is_admin or (doc_owner_id is not None and doc_owner_id == curr_id):
-            doc_id = d.get("id") or d.get("document_id")
-            filtered.append({
-                "id": doc_id,
-                "document_id": doc_id,
-                "filename": d.get("filename", "document"),
-                "status": d.get("status", "indexed"),
-                "uploaded_at": d.get("ingested_at") or d.get("uploaded_at") or d.get("created_at"),
-                "chunk_count": d.get("chunk_count", 0),
-                "owner_id": doc_owner_id
-            })
+        if not can_access_document(current_user, d, "READ"):
+            continue
+        doc_id = d.get("id") or d.get("document_id")
+        filtered.append({
+            "id": doc_id,
+            "document_id": doc_id,
+            "filename": d.get("filename"),
+            "status": d.get("status"),
+            "uploaded_at": d.get("ingested_at") or d.get("uploaded_at") or d.get("created_at"),
+            "chunk_count": d.get("chunk_count"),
+            "owner_id": d.get("owner_id"),
+            "owner_username": d.get("owner_username", ""),
+            "owner_department_id": d.get("owner_department_id"),
+            "owner_department_name": d.get("owner_department_name"),
+            "visibility": d.get("visibility"),
+            "category": d.get("category"),
+            "document_type": d.get("document_type"),
+            "mime_type": d.get("mime_type"),
+            "file_size": d.get("file_size")
+            ,"can_download": can_access_document(current_user, d, "DOWNLOAD")
+            ,"can_share": can_access_document(current_user, d, "SHARE") or can_access_document(current_user, d, "MANAGE")
+            ,"can_delete": can_access_document(current_user, d, "DELETE")
+            ,"can_manage": can_access_document(current_user, d, "MANAGE")
+        })
     return filtered
 
 @app.get("/documents/stats", tags=["RAG Operations"])
 async def get_documents_stats(current_user = Depends(get_current_user)):
-    """Retrieves document statistics (total documents, indexed, failed, total chunks, total size bytes)."""
-    is_admin = _get_user_val(current_user, "role") == "admin"
-    curr_id = _get_user_val(current_user, "id")
-    return rag_service.get_document_stats(owner_id=curr_id, is_admin=is_admin)
+    """Retrieves document statistics enforcing enterprise access control."""
+    accessible_ids = get_accessible_document_ids(current_user, permission="READ")
+    return rag_service.get_document_stats(accessible_document_ids=accessible_ids)
 
 @app.post("/documents/upload", tags=["RAG Operations"])
 async def upload_document(
     file: UploadFile = File(...),
+    visibility: str = Form("PRIVATE"),
     current_user = Depends(get_current_user)
 ):
-    """Saves and indexes an uploaded PDF, DOCX, TXT, MD, or CSV document inside the local workspace."""
+    """Saves and indexes an uploaded document enforcing department ownership, access policy, and deduplication security."""
     import re
     import time
+    import hashlib
+    
+    clean_visibility = (visibility or "PRIVATE").upper().strip()
+    if clean_visibility not in ["PRIVATE", "DEPARTMENT", "SHARED", "ORGANIZATION"]:
+        clean_visibility = "PRIVATE"
+        
+    user_attrs = _extract_user_attrs(current_user)
+    user_id = user_attrs["id"]
+    username = user_attrs["username"]
+    user_dept_id = user_attrs["department_id"]
+    user_dept_name = user_attrs["department_name"]
     
     # 1. Reject empty files
     content = await file.read()
@@ -798,6 +858,8 @@ async def upload_document(
             component="app.main",
             status="failure",
             resource=file.filename or "unknown",
+            user_id=user_id,
+            username=username,
             metadata={"filename": file.filename or "unknown", "error_category": "empty_file"}
         )
         raise HTTPException(status_code=400, detail="Empty files are not allowed.")
@@ -810,6 +872,8 @@ async def upload_document(
             component="app.main",
             status="failure",
             resource=file.filename or "unknown",
+            user_id=user_id,
+            username=username,
             metadata={"filename": file.filename or "unknown", "error_category": "file_oversized"}
         )
         raise HTTPException(status_code=400, detail="File size exceeds maximum limit of 10MB.")
@@ -824,6 +888,8 @@ async def upload_document(
             component="app.main",
             status="failure",
             resource=file.filename or "unknown",
+            user_id=user_id,
+            username=username,
             metadata={"filename": file.filename or "unknown", "error_category": "blocked_executable"}
         )
         raise HTTPException(
@@ -837,6 +903,8 @@ async def upload_document(
             component="app.main",
             status="failure",
             resource=file.filename or "unknown",
+            user_id=user_id,
+            username=username,
             metadata={"filename": file.filename or "unknown", "error_category": "unsupported_format"}
         )
         raise HTTPException(
@@ -845,13 +913,82 @@ async def upload_document(
         )
         
     # 4. Filename sanitization to protect against directory traversal
-    ext = os.path.splitext(file.filename)[1].lower()
     base_name = os.path.basename(file.filename)
     clean_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', base_name)
     if not clean_name or clean_name in [".", ".."]:
         clean_name = f"uploaded_document_{int(time.time())}{ext}"
         
-    # 5. Secure target storage location inside the workspace
+    # 5. Check Content Hash Deduplication BEFORE writing permanent file
+    content_hash = hashlib.sha256(content).hexdigest()
+    existing_doc = rag_service.get_document_by_hash(content_hash)
+    if existing_doc and existing_doc.get("status") == "indexed":
+        if not can_access_document(current_user, existing_doc, "READ"):
+            # HASH MATCH != ACCESS GRANTED: User is unauthorized to access the existing document
+            AuditLogger.log_event(
+                action="DOCUMENT_DUPLICATE_DETECTED",
+                component="app.main",
+                status="failure",
+                resource=clean_name,
+                user_id=user_id,
+                username=username,
+                metadata={
+                    "content_hash": content_hash,
+                    "result": "duplicate_detected",
+                    "reason": "unauthorized_duplicate_attempt",
+                    "filename": clean_name
+                }
+            )
+            AuditLogger.log_event(
+                action="DOCUMENT_UPLOAD_FAILED",
+                component="app.main",
+                status="failure",
+                resource=clean_name,
+                user_id=user_id,
+                username=username,
+                metadata={"filename": clean_name, "error_category": "duplicate_rejection"}
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="A document with identical content already exists in the system, but you do not have permission to access it."
+            )
+        else:
+            # User already has access to canonical document: reuse existing index without duplication
+            AuditLogger.log_event(
+                action="DOCUMENT_DUPLICATE_DETECTED",
+                component="app.main",
+                status="success",
+                resource=clean_name,
+                user_id=user_id,
+                username=username,
+                metadata={
+                    "content_hash": content_hash,
+                    "result": "duplicate_detected",
+                    "action": "reused_canonical",
+                    "document_id": existing_doc["id"],
+                    "canonical_document_id": existing_doc["id"],
+                    "filename": clean_name
+                }
+            )
+            return {
+                "id": existing_doc["id"],
+                "document_id": existing_doc["id"],
+                "filename": existing_doc["filename"],
+                "category": existing_doc.get("category", detection.category),
+                "file_type": existing_doc.get("document_type", detection.file_type),
+                "mime_type": existing_doc.get("mime_type", detection.mime_type),
+                "extraction_method": existing_doc.get("extraction_method", detection.extraction_method),
+                "status": "indexed",
+                "uploaded_at": existing_doc.get("uploaded_at") or int(time.time()),
+                "chunk_count": existing_doc.get("chunk_count", 0),
+                "file_size": existing_doc.get("file_size", file_size),
+                "owner_id": existing_doc.get("owner_id", user_id),
+                "owner_username": existing_doc.get("owner_username", username),
+                "owner_department_id": existing_doc.get("owner_department_id", user_dept_id),
+                "owner_department_name": existing_doc.get("owner_department_name", user_dept_name),
+                "visibility": existing_doc.get("visibility", clean_visibility)
+            }
+
+    # 6. Secure target storage location inside the workspace
     upload_dir = os.path.abspath("data/knowledge_base")
     os.makedirs(upload_dir, exist_ok=True)
     
@@ -865,6 +1002,8 @@ async def upload_document(
             component="app.main",
             status="failure",
             resource=clean_name,
+            user_id=user_id,
+            username=username,
             metadata={"filename": clean_name, "error_category": "path_traversal"}
         )
         raise HTTPException(status_code=400, detail="Path traversal attempt blocked.")
@@ -874,7 +1013,9 @@ async def upload_document(
         component="app.main",
         status="success",
         resource=clean_name,
-        metadata={"filename": clean_name, "file_size": file_size, "owner_id": _get_user_val(current_user, "id")}
+        user_id=user_id,
+        username=username,
+        metadata={"filename": clean_name, "file_size": file_size, "owner_id": user_id, "visibility": clean_visibility}
     )
 
     try:
@@ -887,15 +1028,21 @@ async def upload_document(
             component="app.main",
             status="success",
             resource=clean_name,
-            metadata={"filename": clean_name, "file_size": file_size, "owner_id": _get_user_val(current_user, "id")}
+            user_id=user_id,
+            username=username,
+            metadata={"filename": clean_name, "file_size": file_size, "owner_id": user_id}
         )
             
-        # 6. Ingest and calculate vector embeddings
+        # 7. Ingest and calculate vector embeddings
         doc_id = rag_service.ingest_document(
             target_path,
-            owner_id=_get_user_val(current_user, "id"),
-            owner_username=_get_user_val(current_user, "username"),
-            original_filename=clean_name
+            owner_id=user_id,
+            owner_username=username,
+            owner_department_id=user_dept_id,
+            owner_department_name=user_dept_name,
+            visibility=clean_visibility,
+            original_filename=clean_name,
+            current_user=current_user
         )
         
         doc_info = rag_service.get_document(doc_id)
@@ -908,14 +1055,18 @@ async def upload_document(
             component="app.main",
             status="success",
             resource=clean_name,
-            metadata={"filename": clean_name, "owner_id": _get_user_val(current_user, "id"), "id": doc_id, "chunk_count": real_chunk_count}
+            user_id=user_id,
+            username=username,
+            metadata={"filename": clean_name, "owner_id": user_id, "id": doc_id, "chunk_count": real_chunk_count}
         )
         AuditLogger.log_event(
             action="DOCUMENT_INDEXED",
             component="app.main",
             status="success",
             resource=clean_name,
-            metadata={"filename": clean_name, "owner_id": _get_user_val(current_user, "id"), "id": doc_id, "chunk_count": real_chunk_count}
+            user_id=user_id,
+            username=username,
+            metadata={"filename": clean_name, "owner_id": user_id, "id": doc_id, "chunk_count": real_chunk_count}
         )
         
         return {
@@ -930,7 +1081,11 @@ async def upload_document(
             "uploaded_at": int(time.time()),
             "chunk_count": real_chunk_count,
             "file_size": file_size,
-            "owner_id": _get_user_val(current_user, "id")
+            "owner_id": user_id,
+            "owner_username": username,
+            "owner_department_id": user_dept_id,
+            "owner_department_name": user_dept_name,
+            "visibility": clean_visibility
         }
     except HTTPException:
         if os.path.exists(target_path):
@@ -951,6 +1106,8 @@ async def upload_document(
             component="app.main",
             status="failure",
             resource=clean_name,
+            user_id=user_id,
+            username=username,
             metadata={"filename": clean_name, "error_category": "ingestion_failure"}
         )
         from backend.rag.pipeline import DuplicateIngestionError, InsufficientTextError, SafePathViolationError
@@ -962,44 +1119,253 @@ async def upload_document(
             raise HTTPException(status_code=400, detail="Path traversal attempt blocked.")
         raise HTTPException(status_code=500, detail=f"Document indexing failed: {e}")
 
-@app.post("/documents/{id}/index", tags=["RAG Operations"])
-async def reindex_document(id: str, current_user = Depends(get_current_user)):
-    """Triggers manual re-indexing of a saved document file by ID, enforcing ownership."""
-    docs = rag_service.list_documents()
-    doc_file_path = None
-    doc_owner_id = None
-    doc_filename = "unknown"
-    for d in docs:
-        if d.get("id") == id or d.get("document_id") == id:
-            doc_file_path = d.get("source_path")
-            doc_owner_id = d.get("owner_id")
-            doc_filename = d.get("filename", "unknown")
-            break
+class VisibilityUpdateRequest(BaseModel):
+    visibility: str
 
-    if not doc_file_path or not os.path.exists(doc_file_path):
-        raise HTTPException(status_code=404, detail="The requested document file could not be found on the server.")
-        
-    # Authorization checks: owner or admin role
-    is_admin = _get_user_val(current_user, "role") == "admin"
-    if not is_admin and (doc_owner_id is None or doc_owner_id != _get_user_val(current_user, "id")):
+def _resolve_document_info(doc_id: str, current_user = None) -> Optional[Dict[str, Any]]:
+    doc_info = None
+    try:
+        res = rag_service.get_document(doc_id)
+        if isinstance(res, (dict, sqlite3.Row)):
+            doc_info = dict(res)
+    except Exception:
+        pass
+
+    if doc_info is None:
+        try:
+            docs = rag_service.list_documents(current_user=current_user)
+            if isinstance(docs, (list, tuple)):
+                for d in docs:
+                    if isinstance(d, (dict, sqlite3.Row)):
+                        d_dict = dict(d)
+                        if d_dict.get("id") == doc_id or d_dict.get("document_id") == doc_id:
+                            doc_info = d_dict
+                            break
+        except Exception:
+            pass
+    return doc_info
+
+@app.post("/documents/{id}/share", tags=["Document Permissions"])
+async def share_document(
+    id: str,
+    payload: DocumentShareRequest,
+    current_user = Depends(get_current_user)
+):
+    """Explicitly grants document permission to a target user or department."""
+    from datetime import datetime, timezone
+    doc_info = _resolve_document_info(id, current_user)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    user_attrs = _extract_user_attrs(current_user)
+    if not can_access_document(current_user, doc_info, "SHARE") and not can_access_document(current_user, doc_info, "MANAGE"):
         AuditLogger.log_event(
             action="DOCUMENT_ACCESS_DENIED",
             component="app.main",
             status="failure",
-            resource=doc_filename,
-            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "attempted_by": _get_user_val(current_user, "id"), "operation": "reindex"}
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={"document_id": id, "operation": "share"}
         )
-        raise HTTPException(status_code=403, detail="Access denied. You do not own this document.")
-        
+        raise HTTPException(status_code=403, detail="Access denied. You do not have permission to share this document.")
+
+    if not payload.user_id and not payload.department_id:
+        raise HTTPException(status_code=400, detail="Either user_id or department_id must be provided to share.")
+
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.cursor()
+        now_str = datetime.now(timezone.utc).isoformat()
+        cursor.execute("""
+            INSERT INTO document_permissions (document_id, user_id, department_id, permission, granted_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            id,
+            payload.user_id,
+            payload.department_id,
+            payload.permission.upper().strip(),
+            user_attrs["id"],
+            now_str
+        ))
+        perm_id = cursor.lastrowid
+        conn.commit()
+
+        AuditLogger.log_event(
+            action="DOCUMENT_SHARED",
+            component="app.main",
+            status="success",
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={
+                "document_id": id,
+                "target_user_id": payload.user_id,
+                "target_department_id": payload.department_id,
+                "permission": payload.permission.upper().strip()
+            }
+        )
+        AuditLogger.log_event(
+            action="DOCUMENT_ACCESS_GRANTED",
+            component="app.main",
+            status="success",
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={
+                "document_id": id,
+                "target_user_id": payload.user_id,
+                "target_department_id": payload.department_id,
+                "permission": payload.permission.upper().strip()
+            }
+        )
+
+        return {
+            "id": perm_id,
+            "document_id": id,
+            "user_id": payload.user_id,
+            "department_id": payload.department_id,
+            "permission": payload.permission.upper().strip(),
+            "granted_by": user_attrs["id"],
+            "created_at": now_str
+        }
+    finally:
+        conn.close()
+
+@app.get("/documents/{id}/permissions", tags=["Document Permissions"])
+async def get_document_permissions(id: str, current_user = Depends(get_current_user)):
+    """Retrieves all active permission grants on a document."""
+    doc_info = _resolve_document_info(id, current_user)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    if not can_access_document(current_user, doc_info, "READ"):
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT dp.*, u.username as user_name, d.name as department_name, gb.username as granted_by_username
+            FROM document_permissions dp
+            LEFT JOIN users u ON dp.user_id = u.id
+            LEFT JOIN departments d ON dp.department_id = d.id
+            LEFT JOIN users gb ON dp.granted_by = gb.id
+            WHERE dp.document_id = ?
+            ORDER BY dp.created_at ASC
+        """, (id,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+@app.delete("/documents/{id}/share/{perm_id}", tags=["Document Permissions"])
+async def revoke_document_permission(id: str, perm_id: int, current_user = Depends(get_current_user)):
+    """Revokes an explicit permission grant on a document."""
+    doc_info = _resolve_document_info(id, current_user)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    user_attrs = _extract_user_attrs(current_user)
+    if not can_access_document(current_user, doc_info, "SHARE") and not can_access_document(current_user, doc_info, "MANAGE"):
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM document_permissions WHERE id = ? AND document_id = ?", (perm_id, id))
+        conn.commit()
+
+        AuditLogger.log_event(
+            action="DOCUMENT_ACCESS_REVOKED",
+            component="app.main",
+            status="success",
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={"document_id": id, "permission_id": perm_id}
+        )
+        return {"status": "success", "message": "Permission grant revoked."}
+    finally:
+        conn.close()
+
+@app.patch("/documents/{id}/visibility", tags=["Document Permissions"])
+async def update_document_visibility(
+    id: str,
+    payload: VisibilityUpdateRequest,
+    current_user = Depends(get_current_user)
+):
+    """Updates document visibility policy (PRIVATE, DEPARTMENT, ORGANIZATION)."""
+    from datetime import datetime, timezone
+    clean_visibility = payload.visibility.upper().strip()
+    if clean_visibility not in ["PRIVATE", "DEPARTMENT", "SHARED", "ORGANIZATION"]:
+        raise HTTPException(status_code=400, detail="Invalid visibility policy. Must be PRIVATE, DEPARTMENT, SHARED, or ORGANIZATION.")
+
+    doc_info = _resolve_document_info(id, current_user)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    user_attrs = _extract_user_attrs(current_user)
+    if not can_access_document(current_user, doc_info, "MANAGE") and doc_info.get("owner_id") != user_attrs["id"]:
+        raise HTTPException(status_code=403, detail="Access denied. Only owner or manager can change visibility.")
+
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.cursor()
+        now_str = datetime.now(timezone.utc).isoformat()
+        cursor.execute("UPDATE documents SET visibility = ?, updated_at = ? WHERE id = ?", (clean_visibility, now_str, id))
+        conn.commit()
+
+        AuditLogger.log_event(
+            action="DOCUMENT_UPDATED",
+            component="app.main",
+            status="success",
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={"document_id": id, "visibility": clean_visibility}
+        )
+        return {"status": "success", "id": id, "visibility": clean_visibility}
+    finally:
+        conn.close()
+
+@app.post("/documents/{id}/index", tags=["RAG Operations"])
+async def reindex_document(id: str, current_user = Depends(get_current_user)):
+    """Triggers manual re-indexing of a saved document file by ID, enforcing access control."""
+    doc_info = _resolve_document_info(id, current_user)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="The requested document could not be found.")
+
+    user_attrs = _extract_user_attrs(current_user)
+    if not can_access_document(current_user, doc_info, "MANAGE") and doc_info.get("owner_id") != user_attrs["id"]:
+        AuditLogger.log_event(
+            action="DOCUMENT_ACCESS_DENIED",
+            component="app.main",
+            status="failure",
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={"document_id": id, "operation": "reindex"}
+        )
+        raise HTTPException(status_code=403, detail="Access denied. You do not have permission to re-index this document.")
+
+    doc_file_path = doc_info.get("source_path")
+    if not doc_file_path or not os.path.exists(doc_file_path):
+        raise HTTPException(status_code=404, detail="The requested document file could not be found on the server.")
+
     try:
         # Delete old vectors
         rag_service.delete_document(id)
         # Re-index preserving metadata
         new_doc_id = rag_service.ingest_document(
             doc_file_path,
-            owner_id=doc_owner_id,
-            owner_username=_get_user_val(current_user, "username"),
-            original_filename=doc_filename
+            owner_id=doc_info.get("owner_id"),
+            owner_username=doc_info.get("owner_username"),
+            owner_department_id=doc_info.get("owner_department_id"),
+            owner_department_name=doc_info.get("owner_department_name"),
+            visibility=doc_info.get("visibility", "PRIVATE"),
+            original_filename=doc_info.get("filename")
         )
         
         # Log DOCUMENT_INDEXED
@@ -1007,8 +1373,10 @@ async def reindex_document(id: str, current_user = Depends(get_current_user)):
             action="DOCUMENT_INDEXED",
             component="app.main",
             status="success",
-            resource=doc_filename,
-            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "id": new_doc_id}
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={"filename": doc_info.get("filename", id), "owner_id": doc_info.get("owner_id"), "id": new_doc_id}
         )
         
         return {
@@ -1022,15 +1390,23 @@ async def reindex_document(id: str, current_user = Depends(get_current_user)):
 
 @app.get("/documents/{id}/preview", tags=["RAG Operations"])
 async def preview_document(id: str, current_user = Depends(get_current_user)):
-    """Securely streams document file bytes or thumbnail for authenticated owner or admin."""
+    """Securely streams document file bytes or thumbnail for authorized users."""
     from fastapi.responses import FileResponse
-    doc_info = rag_service.get_document(id)
+    doc_info = _resolve_document_info(id, current_user)
     if not doc_info:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    doc_owner_id = doc_info.get("owner_id")
-    is_admin = _get_user_val(current_user, "role") == "admin"
-    if not is_admin and doc_owner_id is not None and doc_owner_id != _get_user_val(current_user, "id"):
+    if not can_access_document(current_user, doc_info, "READ"):
+        user_attrs = _extract_user_attrs(current_user)
+        AuditLogger.log_event(
+            action="DOCUMENT_ACCESS_DENIED",
+            component="app.main",
+            status="failure",
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={"document_id": id, "operation": "preview"}
+        )
         raise HTTPException(status_code=403, detail="Access denied.")
 
     source_path = doc_info.get("source_path")
@@ -1047,39 +1423,105 @@ async def preview_document(id: str, current_user = Depends(get_current_user)):
 
 @app.get("/documents/{id}/download", tags=["RAG Operations"])
 async def download_uploaded_document(id: str, current_user = Depends(get_current_user)):
-    """Downloads the authenticated user's uploaded document file."""
-    return await preview_document(id=id, current_user=current_user)
+    """Downloads the document file with access control check and audit logging."""
+    doc_info = _resolve_document_info(id, current_user)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="Document not found.")
 
-@app.delete("/documents/{id}", tags=["RAG Operations"])
-async def delete_document(id: str, current_user = Depends(get_current_user)):
-    """Deletes vector references and removes the physical document from the disk, enforcing ownership."""
-    docs = rag_service.list_documents()
-    doc_file_path = None
-    doc_filename = "unknown"
-    doc_owner_id = None
-    for d in docs:
-        if d.get("id") == id or d.get("document_id") == id:
-            doc_file_path = d.get("source_path")
-            doc_filename = d.get("filename", "unknown")
-            doc_owner_id = d.get("owner_id")
-            break
-
-    if not doc_filename or (doc_owner_id is None and not doc_file_path):
-        raise HTTPException(status_code=404, detail="The requested document could not be found.")
-
-    # Authorization checks: owner or admin role
-    is_admin = _get_user_val(current_user, "role") == "admin"
-    if not is_admin and (doc_owner_id is None or doc_owner_id != _get_user_val(current_user, "id")):
+    user_attrs = _extract_user_attrs(current_user)
+    if not can_access_document(current_user, doc_info, "DOWNLOAD"):
         AuditLogger.log_event(
             action="DOCUMENT_ACCESS_DENIED",
             component="app.main",
             status="failure",
-            resource=doc_filename,
-            metadata={"filename": doc_filename, "owner_id": doc_owner_id, "attempted_by": _get_user_val(current_user, "id"), "operation": "delete"}
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={
+                "resource_type": "document",
+                "resource_id": id,
+                "document_id": id,
+                "action": "download",
+                "result": "denied",
+                "reason": "forbidden"
+            }
         )
-        raise HTTPException(status_code=403, detail="Access denied. You do not own this document.")
-        
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="app.main",
+            status="failure",
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={
+                "resource_type": "document",
+                "resource_id": id,
+                "action": "download",
+                "result": "denied"
+            }
+        )
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    source_path = doc_info.get("source_path")
+    if not source_path or not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail="Document file not found on local storage.")
+
+    # Safe directory check
+    safe_base = os.path.abspath("data/knowledge_base")
+    if not os.path.abspath(source_path).startswith(safe_base):
+        raise HTTPException(status_code=400, detail="Safe path boundary violation.")
+
+    fmt = doc_info.get("document_type") or doc_info.get("file_type") or (doc_info.get("filename", "").split(".")[-1] if "." in doc_info.get("filename", "") else "")
+    AuditLogger.log_event(
+        action="DOCUMENT_DOWNLOADED",
+        component="app.main",
+        status="success",
+        user_id=user_attrs["id"],
+        username=user_attrs["username"],
+        resource=doc_info.get("filename", id),
+        metadata={
+            "document_id": id,
+            "artifact_id": id,
+            "format": fmt,
+            "output_format": fmt,
+            "filename": doc_info.get("filename"),
+            "file_size": doc_info.get("file_size")
+        }
+    )
+
+    mime_type = doc_info.get("mime_type", "application/octet-stream")
+    return FileResponse(source_path, media_type=mime_type, filename=doc_info.get("filename"))
+
+@app.delete("/documents/{id}", tags=["RAG Operations"])
+async def delete_document(id: str, current_user = Depends(get_current_user)):
+    """Deletes vector references and removes physical document from disk, enforcing authorization."""
+    doc_info = _resolve_document_info(id, current_user)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="The requested document could not be found.")
+
+    user_attrs = _extract_user_attrs(current_user)
+    if not can_access_document(current_user, doc_info, "DELETE"):
+        AuditLogger.log_event(
+            action="DOCUMENT_ACCESS_DENIED",
+            component="app.main",
+            status="failure",
+            resource=doc_info.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={
+                "document_id": id,
+                "owner_id": doc_info.get("owner_id"),
+                "attempted_by": user_attrs["id"],
+                "operation": "delete"
+            }
+        )
+        raise HTTPException(status_code=403, detail="Access denied. You do not have permission to delete this document.")
+
     try:
+        doc_filename = doc_info.get("filename", "unknown")
+        doc_owner_id = doc_info.get("owner_id")
+        doc_file_path = doc_info.get("source_path")
+        
         rag_service.delete_document(id)
         if doc_file_path and os.path.exists(doc_file_path):
             try:
@@ -1091,6 +1533,8 @@ async def delete_document(id: str, current_user = Depends(get_current_user)):
             component="app.main",
             status="success",
             resource=doc_filename,
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
             metadata={"filename": doc_filename, "owner_id": doc_owner_id, "id": id}
         )
         return {"status": "success", "id": id, "message": f"Document '{doc_filename}' successfully removed."}
@@ -1156,37 +1600,72 @@ async def generate_document_report(payload: GenerateReportRequest, current_user 
 
 @app.get("/documents/generated", tags=["Document Generation"])
 async def list_generated_documents(current_user = Depends(get_current_user)):
-    """Lists all generated reports owned by the authenticated user."""
-    curr_role = _get_user_val(current_user, "role")
-    curr_id = _get_user_val(current_user, "id")
-    is_admin = curr_role == "admin"
-    return grounded_qa_service.doc_generator.list_generated_documents(owner_id=curr_id, is_admin=is_admin)
+    """Lists all generated reports accessible to the authenticated user."""
+    return grounded_qa_service.doc_generator.list_generated_documents(current_user=current_user)
 
 @app.get("/documents/generated/{id}/download", tags=["Document Generation"])
 async def download_generated_document(id: str, current_user = Depends(get_current_user)):
-    """Streams the physical generated PDF or DOCX file with verified Content-Disposition."""
+    """Streams the physical generated PDF or DOCX file with verified authorization."""
     from fastapi.responses import FileResponse
     doc = grounded_qa_service.doc_generator.get_generated_document(id)
     if not doc:
         raise HTTPException(status_code=404, detail="Generated document not found.")
 
-    curr_role = _get_user_val(current_user, "role")
-    curr_id = _get_user_val(current_user, "id")
-    if curr_role != "admin" and doc.get("owner_id") is not None and doc["owner_id"] != curr_id:
-        raise HTTPException(status_code=403, detail="Access denied. You do not own this document.")
+    if not can_access_generated_document(current_user, doc, "DOWNLOAD"):
+        user_attrs = _extract_user_attrs(current_user)
+        AuditLogger.log_event(
+            action="DOCUMENT_ACCESS_DENIED",
+            component="app.main",
+            status="failure",
+            resource=doc.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={
+                "resource_type": "generated_document",
+                "resource_id": id,
+                "document_id": id,
+                "artifact_id": id,
+                "action": "download",
+                "result": "denied",
+                "reason": "forbidden"
+            }
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="app.main",
+            status="failure",
+            resource=doc.get("filename", id),
+            user_id=user_attrs["id"],
+            username=user_attrs["username"],
+            metadata={
+                "resource_type": "generated_document",
+                "resource_id": id,
+                "action": "download",
+                "result": "denied"
+            }
+        )
+        raise HTTPException(status_code=403, detail="Access denied. You do not have permission to download this generated report.")
 
     file_path = doc.get("file_path")
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Physical document file missing on disk.")
 
+    user_attrs = _extract_user_attrs(current_user)
     AuditLogger.log_event(
         action="DOCUMENT_DOWNLOADED",
         component="app.main",
         status="success",
-        user_id=curr_id,
-        username=_get_user_val(current_user, "username"),
+        user_id=user_attrs["id"],
+        username=user_attrs["username"],
         resource=doc.get("filename", id),
-        metadata={"id": id, "file_size": doc.get("file_size")}
+        metadata={
+            "document_id": id,
+            "artifact_id": id,
+            "format": doc.get("format", "pdf"),
+            "output_format": doc.get("format", "pdf"),
+            "filename": doc.get("filename"),
+            "file_size": doc.get("file_size")
+        }
     )
 
     return FileResponse(
@@ -1202,10 +1681,8 @@ async def delete_generated_document(id: str, current_user = Depends(get_current_
     if not doc:
         raise HTTPException(status_code=404, detail="Generated document not found.")
 
-    curr_role = _get_user_val(current_user, "role")
-    curr_id = _get_user_val(current_user, "id")
-    if curr_role != "admin" and doc.get("owner_id") is not None and doc["owner_id"] != curr_id:
-        raise HTTPException(status_code=403, detail="Access denied. You do not own this document.")
+    if not can_access_generated_document(current_user, doc, "DELETE"):
+        raise HTTPException(status_code=403, detail="Access denied.")
 
     grounded_qa_service.doc_generator.delete_generated_document(id)
     return {"status": "success", "id": id, "message": "Generated document removed."}
@@ -1217,30 +1694,27 @@ class RAGQueryRequest(BaseModel):
 
 @app.post("/documents/query", tags=["RAG Operations"])
 async def query_documents(payload: RAGQueryRequest, current_user = Depends(get_current_user)):
-    """Executes dynamic vector similarity search against the local ChromaDB database with relevance classification."""
-    curr_role = _get_user_val(current_user, "role")
-    curr_id = _get_user_val(current_user, "id")
-    curr_username = _get_user_val(current_user, "username")
-
-    is_admin = curr_role == "admin"
-    filter_meta = None if is_admin else {"owner_id": curr_id}
+    """Executes dynamic vector similarity search against the local ChromaDB database with pre-retrieval filtering."""
+    user_attrs = _extract_user_attrs(current_user)
+    accessible_ids = get_accessible_document_ids(current_user, permission="USE_IN_RAG")
     
     results = rag_service.search(
         query=payload.query,
         top_k=payload.top_k,
-        filter_metadata=filter_meta,
-        document_id=payload.document_id
+        document_id=payload.document_id,
+        accessible_document_ids=accessible_ids
     )
     
     AuditLogger.log_event(
         action="RAG_QUERY",
         component="app.main",
         status="success",
-        user_id=curr_id,
-        username=curr_username,
-        role=curr_role,
+        user_id=user_attrs["id"],
+        username=user_attrs["username"],
+        role=user_attrs["role"],
         metadata={"query_length": len(payload.query), "result_count": len(results)}
     )
+    
     return {
         "query": payload.query,
         "results": results,
@@ -1420,6 +1894,8 @@ async def test_model_inference(payload: Optional[ModelTestRequest] = None, curre
 class SandboxRequest(BaseModel):
     code: str
     timeout_seconds: Optional[int] = 10
+    script_filename: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 @app.post("/sandbox/execute", tags=["Sandbox Operations"])
 async def execute_in_sandbox(payload: SandboxRequest, current_user = Depends(get_current_user)):
@@ -1428,7 +1904,14 @@ async def execute_in_sandbox(payload: SandboxRequest, current_user = Depends(get
     curr_id = _get_user_val(current_user, "id")
     curr_username = _get_user_val(current_user, "username")
     try:
-        res = sandbox_service.execute(payload.code, timeout_seconds=payload.timeout_seconds)
+        res = sandbox_service.execute(
+            code=payload.code,
+            timeout_seconds=payload.timeout_seconds,
+            user_id=curr_id,
+            username=curr_username,
+            conversation_id=payload.conversation_id,
+            script_filename=payload.script_filename
+        )
         AuditLogger.log_event(
             action="SANDBOX_EXECUTION",
             component="app.main",
@@ -1460,6 +1943,44 @@ async def execute_in_sandbox(payload: SandboxRequest, current_user = Depends(get
             metadata={"error_category": str(e)}
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sandbox/files", tags=["Sandbox Operations"])
+async def list_sandbox_files(current_user = Depends(get_current_user)):
+    """Lists real sandbox files owned by the authenticated user or all files if administrator."""
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    is_admin = curr_role == "admin"
+    return sandbox_service.list_files(user_id=curr_id, is_admin=is_admin)
+
+@app.get("/sandbox/files/{file_id}", tags=["Sandbox Operations"])
+async def get_sandbox_file(file_id: str, current_user = Depends(get_current_user)):
+    """Gets details and source content of a sandbox file with owner RBAC authorization."""
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    is_admin = curr_role == "admin"
+    file_info = sandbox_service.get_file(file_id=file_id, user_id=curr_id, is_admin=is_admin)
+    if not file_info:
+        raise HTTPException(status_code=404, detail="Sandbox file not found or unauthorized.")
+    return file_info
+
+@app.get("/sandbox/executions", tags=["Sandbox Operations"])
+async def list_sandbox_executions(limit: int = 50, current_user = Depends(get_current_user)):
+    """Lists real recorded sandbox executions owned by the user or all executions if administrator."""
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    is_admin = curr_role == "admin"
+    return sandbox_service.list_executions(user_id=curr_id, is_admin=is_admin, limit=limit)
+
+@app.get("/sandbox/executions/{execution_id}", tags=["Sandbox Operations"])
+async def get_sandbox_execution(execution_id: str, current_user = Depends(get_current_user)):
+    """Gets details and telemetry for a specific sandbox execution with owner RBAC authorization."""
+    curr_role = _get_user_val(current_user, "role")
+    curr_id = _get_user_val(current_user, "id")
+    is_admin = curr_role == "admin"
+    exec_info = sandbox_service.get_execution(execution_id=execution_id, user_id=curr_id, is_admin=is_admin)
+    if not exec_info:
+        raise HTTPException(status_code=404, detail="Sandbox execution not found or unauthorized.")
+    return exec_info
 
 @app.get("/sandbox/artifacts/{artifact_id}/download", tags=["Sandbox Operations"])
 async def download_sandbox_artifact(artifact_id: str, current_user = Depends(get_current_user)):
@@ -1497,7 +2018,29 @@ async def download_sandbox_artifact(artifact_id: str, current_user = Depends(get
                 username=curr_username,
                 role=curr_role,
                 resource=artifact_id,
-                metadata={"reason": "ARTIFACT_OWNERSHIP_FORBIDDEN", "artifact_id": artifact_id}
+                metadata={
+                    "resource_type": "artifact",
+                    "resource_id": artifact_id,
+                    "artifact_id": artifact_id,
+                    "action": "download",
+                    "result": "denied",
+                    "reason": "ARTIFACT_OWNERSHIP_FORBIDDEN"
+                }
+            )
+            AuditLogger.log_event(
+                action="AUTHORIZATION_FAILURE",
+                component="app.main",
+                status="failure",
+                user_id=curr_id,
+                username=curr_username,
+                role=curr_role,
+                resource=artifact_id,
+                metadata={
+                    "resource_type": "artifact",
+                    "resource_id": artifact_id,
+                    "action": "download",
+                    "result": "denied"
+                }
             )
             raise HTTPException(status_code=403, detail="Access denied. You do not own this sandbox artifact.")
 
@@ -1507,13 +2050,15 @@ async def download_sandbox_artifact(artifact_id: str, current_user = Depends(get
 
         # Safe directory boundary check
         allowed_dirs = [
+            os.path.abspath("data/sandbox"),
             os.path.abspath("data/artifacts/sandbox"),
-            os.path.abspath(getattr(sandbox_service, "artifacts_storage", "data/artifacts/sandbox"))
+            os.path.abspath(getattr(sandbox_service, "artifacts_storage", "data/sandbox"))
         ]
         abs_target = os.path.abspath(file_path)
         if not any(abs_target.startswith(base) for base in allowed_dirs):
             raise HTTPException(status_code=400, detail="Safe path boundary violation.")
 
+        ext = (art["filename"].split(".")[-1] if "." in art["filename"] else "file")
         AuditLogger.log_event(
             action="DOCUMENT_DOWNLOADED",
             component="app.main",
@@ -1522,7 +2067,14 @@ async def download_sandbox_artifact(artifact_id: str, current_user = Depends(get
             username=curr_username,
             role=curr_role,
             resource=artifact_id,
-            metadata={"filename": art["filename"], "file_size": art["file_size"]}
+            metadata={
+                "artifact_id": artifact_id,
+                "document_id": artifact_id,
+                "format": ext,
+                "output_format": ext,
+                "filename": art["filename"],
+                "file_size": art["file_size"]
+            }
         )
 
         return FileResponse(
@@ -1587,5 +2139,18 @@ if __name__ == "__main__":
         "backend.app.main:app",
         host=settings.HOST,
         port=settings.PORT,
-        reload=(settings.APP_ENV == "development")
+        reload=(settings.APP_ENV == "development"),
+        reload_dirs=["backend"],
+        reload_excludes=[
+            "data*",
+            "sandbox_runs*",
+            "sandbox_runs_test*",
+            "*/data/*",
+            "*/data/**/*",
+            "*/sandbox_runs/*",
+            "*/sandbox_runs/**/*",
+            "*/sandbox_runs_test/*",
+            "*/sandbox_runs_test/**/*"
+        ]
     )
+

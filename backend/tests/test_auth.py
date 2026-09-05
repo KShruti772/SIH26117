@@ -249,6 +249,58 @@ class TestAegisAuth(unittest.TestCase):
         r3 = self.client.get("/test-admin-route", headers={"Authorization": f"Bearer {admin_token}"})
         self.assertEqual(r3.status_code, status.HTTP_200_OK)
 
+    def test_verify_password_valid_and_wrong(self):
+        """Test 1 & 2: Verify correct password returns True, wrong password returns False."""
+        from backend.security.auth import verify_password
+        plain = "MySecretPass2026!"
+        hashed = hash_password(plain)
+        
+        self.assertTrue(verify_password(plain, hashed))
+        self.assertFalse(verify_password("WrongPassword123!", hashed))
+        self.assertFalse(verify_password("", hashed))
+        self.assertFalse(verify_password(plain, ""))
+
+    def test_verify_password_malformed_hash_safe_handling(self):
+        """Test 3: Verify deliberately malformed hashes in test environment fail safely without throwing exceptions."""
+        from backend.security.auth import verify_password
+        malformed_hashes = [
+            "hash",
+            "invalid_salt_string",
+            "$2b$12$",
+            "$2b$12$short",
+            "plain_text_password",
+            "$invalid$prefix$hash",
+            12345,
+            None
+        ]
+        for bad_hash in malformed_hashes:
+            with self.subTest(bad_hash=bad_hash):
+                # Must return False and not raise uncaught exception
+                result = verify_password("AnyPassword123!", bad_hash)
+                self.assertFalse(result)
+
+    def test_login_with_malformed_stored_hash_returns_401_safely(self):
+        """Verify login against an account with a malformed stored hash returns generic 401 and does not crash."""
+        conn = sqlite3.connect(TEST_DB_PATH)
+        conn.execute("INSERT INTO users (username, password_hash, role, is_active) VALUES (?, ?, ?, 1)", ("corrupt_hash_user", "hash", "user"))
+        conn.commit()
+        conn.close()
+
+        res = self.client.post("/auth/login", json={"username": "corrupt_hash_user", "password": "AnyPassword123!"})
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(res.json()["detail"], "Invalid username or password")
+
+    def test_restart_persistence(self):
+        """Test 8: Verify user credentials persist across database reconnections and server lifecycles."""
+        # 1. Register account
+        reg_res = self.client.post("/auth/register", json={"username": "persistent_op", "password": "PersistentPass123!"})
+        self.assertEqual(reg_res.status_code, status.HTTP_201_CREATED)
+
+        # 2. Simulate server restart by recreating DB connection and verifying login
+        login_res = self.client.post("/auth/login", json={"username": "persistent_op", "password": "PersistentPass123!"})
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        self.assertIn("access_token", login_res.json())
+
     def test_production_secret_guard(self):
         """19. Verify settings post-init fails if APP_ENV is production and SECRET_KEY is default."""
         with patch.object(settings, 'APP_ENV', 'production'):

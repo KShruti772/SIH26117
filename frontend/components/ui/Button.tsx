@@ -6,5 +6,5 @@ interface ButtonProps extends Omit<AntButtonProps, "type" | "icon" | "variant"> 
 export default function Button({ children, variant = "secondary", icon, className, type: htmlType, ...props }: ButtonProps) {
   const color = variant === "primary" ? "primary" : variant === "destructive" ? "danger" : undefined;
   const antVariant = variant === "ghost" || variant === "icon" ? "text" : variant === "secondary" ? "outlined" : "solid";
-  return <AntButton color={color} variant={antVariant} htmlType={htmlType} icon={icon} className={className} {...props}>{children}</AntButton>;
+  return <AntButton color={color} variant={antVariant} htmlType={htmlType} icon={icon} className={`aegis-button aegis-button--${variant}${className ? ` ${className}` : ""}`} {...props}>{children}</AntButton>;
 }

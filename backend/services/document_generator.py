@@ -104,10 +104,20 @@ class DocumentGeneratorService:
 
         # Metadata banner
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        meta_text = (
-            f"<b>AEGIS Sovereign Intelligence Report</b> | Generated: {now_str} | "
-            f"Classification: <b>CONFIDENTIAL INTERNAL</b>"
-        )
+        meta_parts = [
+            "<b>AEGIS Sovereign Intelligence Report</b>",
+            f"Generated: {now_str}",
+            "Classification: <b>CONFIDENTIAL INTERNAL</b>"
+        ]
+        if metadata:
+            if metadata.get("task_type"):
+                meta_parts.append(f"Task: <b>{metadata['task_type']}</b>")
+            if metadata.get("model"):
+                meta_parts.append(f"Model: <b>{metadata['model']}</b>")
+            if metadata.get("source_filename"):
+                meta_parts.append(f"Source: <b>{metadata['source_filename']}</b>")
+
+        meta_text = " | ".join(meta_parts)
         story.append(Paragraph(meta_text, meta_style))
         story.append(Spacer(1, 8))
         story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#3b82f6"), spaceAfter=14))
@@ -170,7 +180,8 @@ class DocumentGeneratorService:
         title: str,
         sections: Dict[str, str],
         sources: List[Dict[str, Any]],
-        output_file_path: str
+        output_file_path: str,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> int:
         """
         Builds a physical DOCX report using python-docx.
@@ -190,8 +201,21 @@ class DocumentGeneratorService:
 
         # Meta
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        meta_parts = [
+            "AEGIS Sovereign Intelligence Report",
+            f"Generated: {now_str}",
+            "Classification: CONFIDENTIAL"
+        ]
+        if metadata:
+            if metadata.get("task_type"):
+                meta_parts.append(f"Task: {metadata['task_type']}")
+            if metadata.get("model"):
+                meta_parts.append(f"Model: {metadata['model']}")
+            if metadata.get("source_filename"):
+                meta_parts.append(f"Source: {metadata['source_filename']}")
+
         m_p = doc.add_paragraph()
-        m_run = m_p.add_run(f"AEGIS Sovereign Intelligence Report | Generated: {now_str} | Classification: CONFIDENTIAL")
+        m_run = m_p.add_run(" | ".join(meta_parts))
         m_run.font.size = Pt(8.5)
         m_run.font.italic = True
         m_run.font.color.rgb = RGBColor(100, 116, 139)
@@ -235,8 +259,12 @@ class DocumentGeneratorService:
         format_type: str = "pdf",
         owner_id: int = -1,
         owner_username: str = "",
+        owner_department_id: Optional[int] = None,
+        owner_department_name: Optional[str] = None,
+        visibility: str = "PRIVATE",
         source_document_ids: Optional[List[str]] = None,
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Full document generation pipeline:
@@ -244,7 +272,7 @@ class DocumentGeneratorService:
         2. Generates actual PDF or DOCX file to a temporary location.
         3. Verifies file integrity, size, and readability.
         4. Atomically moves file to final storage path.
-        5. Records metadata into SQLite `generated_documents` table.
+        5. Records metadata into SQLite `generated_documents` table with department and visibility.
         6. Logs audit events (STARTED, COMPLETED, FAILED).
         """
         doc_id = f"rep_{uuid.uuid4().hex[:12]}"
@@ -271,15 +299,24 @@ class DocumentGeneratorService:
             user_id=owner_id,
             username=owner_username,
             resource=clean_filename,
-            metadata={"id": doc_id, "title": title, "format": clean_format}
+            metadata={
+                "document_id": doc_id,
+                "artifact_id": doc_id,
+                "conversation_id": conversation_id or "",
+                "output_format": clean_format,
+                "format": clean_format,
+                "title": title,
+                "source_count": len(sources) if sources else 0,
+                "status": "started"
+            }
         )
 
         try:
             # 1. Generate to temporary file
             if clean_format == "pdf":
-                file_size = self.generate_pdf_report(title, sections, sources, temp_out_path)
+                file_size = self.generate_pdf_report(title, sections, sources, temp_out_path, metadata=metadata)
             else:
-                file_size = self.generate_docx_report(title, sections, sources, temp_out_path)
+                file_size = self.generate_docx_report(title, sections, sources, temp_out_path, metadata=metadata)
 
             # 2. Verify temporary file was written and is non-empty
             if not os.path.exists(temp_out_path) or os.path.getsize(temp_out_path) == 0:
@@ -302,12 +339,14 @@ class DocumentGeneratorService:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO generated_documents (
-                        id, owner_id, owner_username, filename, title, format,
+                        id, owner_id, owner_username, owner_department_id, owner_department_name,
+                        visibility, filename, title, format,
                         file_size, mime_type, source_document_ids, conversation_id,
                         status, file_path, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    doc_id, owner_id, owner_username, clean_filename, title, clean_format,
+                    doc_id, owner_id, owner_username, owner_department_id, owner_department_name,
+                    visibility or "PRIVATE", clean_filename, title, clean_format,
                     file_size, mime_type, src_ids_str, conversation_id or "",
                     "completed", out_path, now_str, now_str
                 ))
@@ -324,11 +363,17 @@ class DocumentGeneratorService:
                 username=owner_username,
                 resource=clean_filename,
                 metadata={
-                    "id": doc_id,
-                    "title": title,
+                    "document_id": doc_id,
+                    "artifact_id": doc_id,
+                    "conversation_id": conversation_id or "",
+                    "output_format": clean_format,
                     "format": clean_format,
+                    "title": title,
                     "file_size": file_size,
-                    "source_count": len(sources)
+                    "mime_type": mime_type,
+                    "source_count": len(sources) if sources else 0,
+                    "status": "success",
+                    "result": "success"
                 }
             )
 
@@ -339,6 +384,11 @@ class DocumentGeneratorService:
                 "format": clean_format,
                 "file_size": file_size,
                 "mime_type": mime_type,
+                "owner_id": owner_id,
+                "owner_username": owner_username,
+                "owner_department_id": owner_department_id,
+                "owner_department_name": owner_department_name,
+                "visibility": visibility or "PRIVATE",
                 "source_document_ids": source_document_ids or [],
                 "conversation_id": conversation_id,
                 "status": "completed",
@@ -366,29 +416,44 @@ class DocumentGeneratorService:
                 user_id=owner_id,
                 username=owner_username,
                 resource=clean_filename,
-                metadata={"id": doc_id, "title": title, "error": str(e)}
+                metadata={
+                    "document_id": doc_id,
+                    "artifact_id": doc_id,
+                    "conversation_id": conversation_id or "",
+                    "output_format": clean_format,
+                    "format": clean_format,
+                    "title": title,
+                    "status": "failure",
+                    "result": "failed",
+                    "error_category": type(e).__name__
+                }
             )
             raise
 
     def list_generated_documents(
         self,
+        current_user: Optional[Any] = None,
         owner_id: Optional[int] = None,
         is_admin: bool = False
     ) -> List[Dict[str, Any]]:
-        """Lists generated documents scoped to owner unless user is admin."""
+        """Lists generated documents scoped to owner or accessible via access control."""
+        from backend.security.access_control import can_access_generated_document
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         try:
             cursor = conn.cursor()
+            cursor.execute("SELECT * FROM generated_documents ORDER BY created_at DESC")
+            rows = cursor.fetchall()
+            docs = [dict(r) for r in rows]
+            if current_user is not None:
+                return [d for d in docs if can_access_generated_document(current_user, d, "READ")]
             if is_admin:
-                cursor.execute("SELECT * FROM generated_documents ORDER BY created_at DESC")
+                return docs
             elif owner_id is not None:
-                cursor.execute("SELECT * FROM generated_documents WHERE owner_id = ? ORDER BY created_at DESC", (owner_id,))
+                return [d for d in docs if d.get("owner_id") == owner_id]
             else:
                 return []
-            rows = cursor.fetchall()
-            return [dict(r) for r in rows]
         finally:
             conn.close()
 

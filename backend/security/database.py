@@ -18,21 +18,86 @@ def init_db() -> None:
         conn.execute("PRAGMA busy_timeout=5000")
         cursor = conn.cursor()
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS departments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now', 'utc')),
+                updated_at TEXT DEFAULT (datetime('now', 'utc'))
+            )
+        """)
+
+        # Seed standard initial departments if none exist
+        cursor.execute("SELECT COUNT(*) FROM departments")
+        if cursor.fetchone()[0] == 0:
+            initial_departments = [
+                ("Administration", "Executive and administrative operations"),
+                ("Operations", "Plant and facility operations"),
+                ("Engineering", "Design, automation, and engineering"),
+                ("Maintenance", "Equipment repair and preventive maintenance"),
+                ("Safety", "Industrial safety and regulatory compliance"),
+                ("Finance", "Financial auditing and procurement accounting"),
+                ("Procurement", "Vendor management and materials acquisition"),
+                ("IT", "Information systems and local infrastructure")
+            ]
+            cursor.executemany(
+                "INSERT INTO departments (name, description, is_active) VALUES (?, ?, 1)",
+                initial_departments
+            )
+            conn.commit()
+
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL,
+                department_id INTEGER,
+                department_name TEXT,
                 is_active INTEGER DEFAULT 1,
                 must_change_password INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now', 'utc')),
+                FOREIGN KEY(department_id) REFERENCES departments(id)
+            )
+        """)
+        for col, col_type in [
+            ("must_change_password", "INTEGER DEFAULT 0"),
+            ("department_id", "INTEGER"),
+            ("department_name", "TEXT")
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+        # Backfill department for any existing user missing department
+        cursor.execute("""
+            UPDATE users SET 
+                department_id = (SELECT id FROM departments WHERE name = 'Administration'),
+                department_name = 'Administration'
+            WHERE (department_id IS NULL OR department_name IS NULL OR department_name = '') AND role = 'admin'
+        """)
+        cursor.execute("""
+            UPDATE users SET 
+                department_id = (SELECT id FROM departments WHERE name = 'Operations'),
+                department_name = 'Operations'
+            WHERE (department_id IS NULL OR department_name IS NULL OR department_name = '') AND role != 'admin'
+        """)
+        conn.commit()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS document_permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                user_id INTEGER,
+                department_id INTEGER,
+                permission TEXT NOT NULL DEFAULT 'READ',
+                granted_by INTEGER,
                 created_at TEXT DEFAULT (datetime('now', 'utc'))
             )
         """)
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS audit_logs (
@@ -168,6 +233,9 @@ def init_db() -> None:
             ("chunk_count", "INTEGER DEFAULT 0"),
             ("owner_id", "INTEGER DEFAULT -1"),
             ("owner_username", "TEXT DEFAULT ''"),
+            ("owner_department_id", "INTEGER"),
+            ("owner_department_name", "TEXT DEFAULT ''"),
+            ("visibility", "TEXT DEFAULT 'PRIVATE'"),
             ("status", "TEXT DEFAULT 'indexed'"),
             ("created_at", "TEXT"),
             ("updated_at", "TEXT")
@@ -178,11 +246,26 @@ def init_db() -> None:
             except sqlite3.OperationalError:
                 pass
 
+        # Backfill document department and visibility for existing documents
+        cursor.execute("""
+            UPDATE documents SET visibility = 'PRIVATE' WHERE visibility IS NULL OR visibility = ''
+        """)
+        cursor.execute("""
+            UPDATE documents SET 
+                owner_department_id = (SELECT department_id FROM users WHERE users.id = documents.owner_id),
+                owner_department_name = (SELECT department_name FROM users WHERE users.id = documents.owner_id)
+            WHERE (owner_department_id IS NULL OR owner_department_name IS NULL OR owner_department_name = '') AND owner_id > 0
+        """)
+        conn.commit()
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS generated_documents (
                 id TEXT PRIMARY KEY,
                 owner_id INTEGER DEFAULT -1,
                 owner_username TEXT DEFAULT '',
+                owner_department_id INTEGER,
+                owner_department_name TEXT DEFAULT '',
+                visibility TEXT DEFAULT 'PRIVATE',
                 filename TEXT NOT NULL,
                 title TEXT NOT NULL,
                 format TEXT DEFAULT 'pdf',
@@ -199,6 +282,9 @@ def init_db() -> None:
         for col, col_type in [
             ("owner_id", "INTEGER DEFAULT -1"),
             ("owner_username", "TEXT DEFAULT ''"),
+            ("owner_department_id", "INTEGER"),
+            ("owner_department_name", "TEXT DEFAULT ''"),
+            ("visibility", "TEXT DEFAULT 'PRIVATE'"),
             ("filename", "TEXT"),
             ("title", "TEXT"),
             ("format", "TEXT DEFAULT 'pdf'"),
@@ -246,6 +332,48 @@ def init_db() -> None:
         ]:
             try:
                 cursor.execute(f"ALTER TABLE sandbox_artifacts ADD COLUMN {col} {col_type}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sandbox_executions (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER DEFAULT -1,
+                username TEXT DEFAULT '',
+                conversation_id TEXT DEFAULT '',
+                language TEXT DEFAULT 'python',
+                code TEXT NOT NULL,
+                code_hash TEXT DEFAULT '',
+                filename TEXT DEFAULT 'script.py',
+                exit_code INTEGER DEFAULT -1,
+                stdout TEXT DEFAULT '',
+                stderr TEXT DEFAULT '',
+                duration_ms INTEGER DEFAULT 0,
+                status TEXT NOT NULL,
+                timed_out INTEGER DEFAULT 0,
+                artifacts_json TEXT DEFAULT '[]',
+                created_at TEXT DEFAULT (datetime('now', 'utc'))
+            )
+        """)
+        for col, col_type in [
+            ("user_id", "INTEGER DEFAULT -1"),
+            ("username", "TEXT DEFAULT ''"),
+            ("conversation_id", "TEXT DEFAULT ''"),
+            ("language", "TEXT DEFAULT 'python'"),
+            ("code", "TEXT NOT NULL"),
+            ("code_hash", "TEXT DEFAULT ''"),
+            ("filename", "TEXT DEFAULT 'script.py'"),
+            ("exit_code", "INTEGER DEFAULT -1"),
+            ("stdout", "TEXT DEFAULT ''"),
+            ("stderr", "TEXT DEFAULT ''"),
+            ("duration_ms", "INTEGER DEFAULT 0"),
+            ("status", "TEXT NOT NULL"),
+            ("timed_out", "INTEGER DEFAULT 0"),
+            ("artifacts_json", "TEXT DEFAULT '[]'"),
+            ("created_at", "TEXT")
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE sandbox_executions ADD COLUMN {col} {col_type}")
                 conn.commit()
             except sqlite3.OperationalError:
                 pass

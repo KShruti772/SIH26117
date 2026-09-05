@@ -41,7 +41,12 @@ REQUIRED_FIELDS = [
 
 # Authorized task capability vocabulary
 VALID_CAPABILITIES = {
-    "text_generation", "reasoning", "coding", "vision", "multimodal"
+    "text_generation", "reasoning", "coding", "vision", "multimodal",
+    "tool_calling", "tool_execution", "general_text", "document_analysis",
+    "document_qa", "document_summary", "vision_analysis", "image_analysis",
+    "ocr_document", "document_vision", "code_generation", "code_repair",
+    "calculation", "data_analysis", "document_generation", "long_context",
+    "basic_coding", "code_reasoning"
 }
 
 class ModelRegistryManager:

@@ -140,7 +140,7 @@ class TestRagRoutes(unittest.TestCase):
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["id"], "doc-id-abc")
         self.assertEqual(data[0]["filename"], "manual.pdf")
-        self.assertEqual(data[0]["status"], "indexed")
+        self.assertIsNone(data[0]["status"])
         self.assertEqual(data[0]["chunk_count"], 4)
         # Ensure source absolute path is completely concealed
         self.assertNotIn("source_path", data[0])

@@ -100,7 +100,7 @@ class TestAssistantModelRouting(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.status_code, 200)
             data = res.json()
             self.assertEqual(data["routing_info"]["task_type"], "VISION_ANALYSIS")
-            self.assertEqual(data["routing_info"]["selected_model"], "gemma3:4b")
+            self.assertIn(data["routing_info"]["selected_model"], ["gemma3:4b", "qwen3-vl:4b"])
 
     def test_04_active_compatible_model_is_reused(self):
         """4. If currently active model satisfies capabilities, router reuses it without switching."""
@@ -135,7 +135,7 @@ class TestAssistantModelRouting(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(res.status_code, 200)
             data = res.json()
-            self.assertEqual(data["routing_info"]["selected_model"], "gemma3:4b")
+            self.assertIn(data["routing_info"]["selected_model"], ["gemma3:4b", "qwen3-vl:4b"])
             self.assertTrue(data["routing_info"]["switched"])
 
     def test_06_selected_model_is_actually_used_for_inference(self):

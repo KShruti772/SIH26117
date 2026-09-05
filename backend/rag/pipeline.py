@@ -434,6 +434,9 @@ class AegisRagService:
         chunk_count: int,
         owner_id: Optional[int] = None,
         owner_username: Optional[str] = None,
+        owner_department_id: Optional[int] = None,
+        owner_department_name: Optional[str] = None,
+        visibility: str = "PRIVATE",
         status: str = "indexed",
         mime_type: str = "application/octet-stream",
         document_type: str = "document",
@@ -451,9 +454,10 @@ class AegisRagService:
                 INSERT INTO documents (
                     id, filename, source_path, content_hash, file_size, mime_type,
                     document_type, category, extraction_method, metadata_json,
-                    chunk_count, owner_id, owner_username, status, created_at, updated_at
+                    chunk_count, owner_id, owner_username, owner_department_id, owner_department_name,
+                    visibility, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     filename = excluded.filename,
                     source_path = excluded.source_path,
@@ -466,6 +470,9 @@ class AegisRagService:
                     chunk_count = excluded.chunk_count,
                     owner_id = excluded.owner_id,
                     owner_username = excluded.owner_username,
+                    owner_department_id = excluded.owner_department_id,
+                    owner_department_name = excluded.owner_department_name,
+                    visibility = excluded.visibility,
                     status = excluded.status,
                     updated_at = excluded.updated_at
             """, (
@@ -474,9 +481,62 @@ class AegisRagService:
                 chunk_count,
                 owner_id if owner_id is not None else -1,
                 owner_username or "",
+                owner_department_id,
+                owner_department_name,
+                visibility or "PRIVATE",
                 status, now_str, now_str
             ))
             conn.commit()
+        finally:
+            conn.close()
+
+    def get_document_by_hash(self, content_hash: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a single logical document metadata by content hash or id."""
+        db_path = get_db_path()
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, filename, source_path, content_hash, file_size, mime_type,
+                       document_type, category, extraction_method, metadata_json,
+                       chunk_count, owner_id, owner_username, owner_department_id,
+                       owner_department_name, visibility, status, created_at, updated_at
+                FROM documents
+                WHERE content_hash = ? OR id = ?
+                LIMIT 1
+            """, (content_hash, content_hash))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            meta = {}
+            if "metadata_json" in row.keys() and row["metadata_json"]:
+                try:
+                    meta = json.loads(row["metadata_json"])
+                except Exception:
+                    meta = {}
+            return {
+                "id": row["id"],
+                "document_id": row["id"],
+                "filename": row["filename"],
+                "source_path": row["source_path"],
+                "content_hash": row["content_hash"],
+                "file_size": row["file_size"],
+                "mime_type": row["mime_type"],
+                "document_type": row["document_type"] if "document_type" in row.keys() else "document",
+                "category": row["category"] if "category" in row.keys() else "document",
+                "extraction_method": row["extraction_method"] if "extraction_method" in row.keys() else "native",
+                "metadata": meta,
+                "chunk_count": row["chunk_count"],
+                "owner_id": row["owner_id"],
+                "owner_username": row["owner_username"],
+                "owner_department_id": row["owner_department_id"] if "owner_department_id" in row.keys() else None,
+                "owner_department_name": row["owner_department_name"] if "owner_department_name" in row.keys() else None,
+                "visibility": row["visibility"] if "visibility" in row.keys() else "PRIVATE",
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
         finally:
             conn.close()
 
@@ -487,14 +547,20 @@ class AegisRagService:
         chunk_overlap: int = 150,
         owner_id: Optional[int] = None,
         owner_username: Optional[str] = None,
-        original_filename: Optional[str] = None
+        owner_department_id: Optional[int] = None,
+        owner_department_name: Optional[str] = None,
+        visibility: str = "PRIVATE",
+        original_filename: Optional[str] = None,
+        current_user: Optional[Any] = None
     ) -> str:
         """
         Universal ingestion entrypoint: Detects file type via binary magic-bytes,
         extracts normalized pages/sheets/slides/code/OCR, chunks text, generates local embeddings,
         and registers the document in ChromaDB and SQLite.
+        Enforces deduplication security (HASH MATCH != ACCESS GRANTED).
         """
         from backend.security.audit import AuditLogger
+        from backend.security.access_control import can_access_document
         
         # 1. Path Safety & Existence validations
         try:
@@ -520,6 +586,9 @@ class AegisRagService:
                     chunk_count=0,
                     owner_id=owner_id,
                     owner_username=owner_username,
+                    owner_department_id=owner_department_id,
+                    owner_department_name=owner_department_name,
+                    visibility=visibility,
                     status="failed",
                     mime_type="application/octet-stream",
                     document_type="empty",
@@ -541,6 +610,64 @@ class AegisRagService:
             if not detection.is_valid:
                 raise ValueError(detection.error_reason or f"Invalid or unsupported file format for '{filename}'.")
 
+            # 2. Secure Deduplication Verification (HASH MATCH != ACCESS GRANTED)
+            existing_doc = self.get_document_by_hash(content_hash)
+            if existing_doc and existing_doc.get("status") == "indexed":
+                # Build user context for permission check
+                user_ctx = current_user or {
+                    "id": owner_id,
+                    "username": owner_username,
+                    "department_id": owner_department_id,
+                    "department_name": owner_department_name,
+                    "role": "user"
+                }
+                
+                if not can_access_document(user_ctx, existing_doc, "READ"):
+                    # Unauthorized duplicate attempt: Reject without disclosing document info
+                    AuditLogger.log_event(
+                        action="DOCUMENT_DUPLICATE_DETECTED",
+                        component="rag.pipeline",
+                        status="failure",
+                        resource=filename,
+                        user_id=owner_id,
+                        username=owner_username,
+                        metadata={
+                            "content_hash": content_hash,
+                            "result": "duplicate_detected",
+                            "reason": "unauthorized_duplicate_attempt",
+                            "filename": filename
+                        }
+                    )
+                    AuditLogger.log_event(
+                        action="DOCUMENT_INDEX_FAILED",
+                        component="rag.pipeline",
+                        status="failure",
+                        resource=filename,
+                        user_id=owner_id,
+                        username=owner_username,
+                        metadata={"filename": filename, "error_category": "duplicate_rejection"}
+                    )
+                    raise DuplicateIngestionError("A document with identical content already exists in the system, but you do not have permission to access it.")
+                else:
+                    # Authorized user uploaded duplicate: Log and raise DuplicateIngestionError confirming existing document
+                    AuditLogger.log_event(
+                        action="DOCUMENT_DUPLICATE_DETECTED",
+                        component="rag.pipeline",
+                        status="success",
+                        resource=filename,
+                        user_id=owner_id,
+                        username=owner_username,
+                        metadata={
+                            "content_hash": content_hash,
+                            "result": "duplicate_detected",
+                            "action": "reused_canonical",
+                            "document_id": existing_doc["id"],
+                            "canonical_document_id": existing_doc["id"],
+                            "filename": filename
+                        }
+                    )
+                    raise DuplicateIngestionError(f"Document with identical content '{existing_doc.get('filename')}' is already indexed in the repository.")
+
             # Record initial PROCESSING state in SQLite
             self._sync_sqlite_document(
                 doc_id=doc_id,
@@ -551,6 +678,9 @@ class AegisRagService:
                 chunk_count=0,
                 owner_id=owner_id,
                 owner_username=owner_username,
+                owner_department_id=owner_department_id,
+                owner_department_name=owner_department_name,
+                visibility=visibility,
                 status="processing",
                 mime_type=detection.mime_type,
                 document_type=detection.file_type,
@@ -567,7 +697,7 @@ class AegisRagService:
                 metadata={"filename": filename, "id": doc_id, "file_size": file_size}
             )
         except Exception as e:
-            if not isinstance(e, SafePathViolationError) and not isinstance(e, InsufficientTextError):
+            if not isinstance(e, SafePathViolationError) and not isinstance(e, InsufficientTextError) and not isinstance(e, DuplicateIngestionError):
                 AuditLogger.log_event(
                     action="DOCUMENT_INDEX_FAILED",
                     component="rag.pipeline",
@@ -576,21 +706,6 @@ class AegisRagService:
                     metadata={"filename": os.path.basename(file_path), "error_category": "path_resolution_error"}
                 )
             raise
-
-        # 2. Duplicate Ingestion Verification
-        existing = self.collection.get(
-            where={"content_hash": content_hash},
-            limit=1
-        )
-        if existing and existing.get("ids") and len(existing["ids"]) > 0:
-            AuditLogger.log_event(
-                action="DOCUMENT_INDEX_FAILED",
-                component="rag.pipeline",
-                status="failure",
-                resource=filename,
-                metadata={"filename": filename, "error_category": "duplicate_rejection"}
-            )
-            raise DuplicateIngestionError(f"Ingestion rejected. Document '{filename}' is already indexed.")
 
         # 3. Read Page Contents via Universal Extractor Registry
         try:
@@ -613,6 +728,9 @@ class AegisRagService:
                 chunk_count=0,
                 owner_id=owner_id,
                 owner_username=owner_username,
+                owner_department_id=owner_department_id,
+                owner_department_name=owner_department_name,
+                visibility=visibility,
                 status="failed",
                 mime_type=detection.mime_type,
                 document_type=detection.file_type,
@@ -671,7 +789,10 @@ class AegisRagService:
                     "embedding_model": getattr(self.embedding_model, "model_name", "all-MiniLM-L6-v2"),
                     "is_mock": getattr(self.embedding_model, "is_mock", False),
                     "owner_id": owner_id if owner_id is not None else -1,
-                    "owner_username": owner_username if owner_username is not None else ""
+                    "owner_username": owner_username if owner_username is not None else "",
+                    "owner_department_id": owner_department_id if owner_department_id is not None else -1,
+                    "owner_department_name": owner_department_name or "",
+                    "visibility": visibility or "PRIVATE"
                 })
                 chunk_idx += 1
                 
@@ -696,6 +817,9 @@ class AegisRagService:
                     chunk_count=chunk_idx,
                     owner_id=owner_id,
                     owner_username=owner_username,
+                    owner_department_id=owner_department_id,
+                    owner_department_name=owner_department_name,
+                    visibility=visibility,
                     status="indexed",
                     mime_type=norm_doc.mime_type,
                     document_type=norm_doc.file_type,
@@ -737,6 +861,9 @@ class AegisRagService:
                     chunk_count=0,
                     owner_id=owner_id,
                     owner_username=owner_username,
+                    owner_department_id=owner_department_id,
+                    owner_department_name=owner_department_name,
+                    visibility=visibility,
                     status="failed",
                     mime_type=norm_doc.mime_type,
                     document_type=norm_doc.file_type,
@@ -761,8 +888,6 @@ class AegisRagService:
                 raise e
             
         return doc_id
-            
-        return doc_id
 
     def search(
         self, 
@@ -770,11 +895,13 @@ class AegisRagService:
         top_k: int = 3, 
         filter_metadata: Optional[Dict[str, Any]] = None,
         max_distance: Optional[float] = None,
-        document_id: Optional[str] = None
+        document_id: Optional[str] = None,
+        accessible_document_ids: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Executes semantic vector similarity search against local ChromaDB with
-        cosine distance thresholding, relevance classification, and deduplication.
+        cosine distance thresholding, relevance classification, deduplication,
+        and pre-retrieval authorization filtering.
         """
         from backend.security.audit import AuditLogger
         start_time = time.perf_counter()
@@ -787,6 +914,16 @@ class AegisRagService:
                 metadata={"error_category": "empty_query"}
             )
             return []
+
+        # Enforce pre-retrieval accessible document IDs filtering
+        if accessible_document_ids is not None:
+            if not accessible_document_ids:
+                # User has zero accessible documents in scope
+                return []
+            if document_id:
+                if document_id not in accessible_document_ids:
+                    # User does not have access to this specific target document
+                    return []
 
         try:
             cnt = self.collection.count()
@@ -805,8 +942,14 @@ class AegisRagService:
         where_filter = {}
         if filter_metadata:
             where_filter.update(filter_metadata)
+            
         if document_id:
             where_filter["document_id"] = document_id
+        elif accessible_document_ids is not None:
+            if len(accessible_document_ids) == 1:
+                where_filter["document_id"] = accessible_document_ids[0]
+            else:
+                where_filter["document_id"] = {"$in": accessible_document_ids}
 
         if len(where_filter) > 1:
             where_clause = {"$and": [{k: v} for k, v in where_filter.items()]}
@@ -920,6 +1063,7 @@ class AegisRagService:
             row = cursor.fetchone()
             if row:
                 source_path = row[0]
+            cursor.execute("DELETE FROM document_permissions WHERE document_id = ?", (doc_id,))
             cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
             conn.commit()
         finally:
@@ -943,7 +1087,12 @@ class AegisRagService:
                 
         logger.info(f"Successfully deleted document ID '{doc_id}' from vector store and registry.")
 
-    def list_documents(self, owner_id: Optional[int] = None, is_admin: bool = False) -> List[Dict[str, Any]]:
+    def list_documents(
+        self,
+        accessible_document_ids: Optional[List[str]] = None,
+        owner_id: Optional[int] = None,
+        is_admin: bool = False
+    ) -> List[Dict[str, Any]]:
         """
         Retrieves list of all unique logical documents from authoritative SQLite database
         and cross-references with ChromaDB.
@@ -956,10 +1105,16 @@ class AegisRagService:
             query = """
                 SELECT id, filename, source_path, content_hash, file_size, mime_type,
                        document_type, category, extraction_method, metadata_json,
-                       chunk_count, owner_id, owner_username, status, created_at, updated_at
+                       chunk_count, owner_id, owner_username, owner_department_id,
+                       owner_department_name, visibility, status, created_at, updated_at
                 FROM documents
             """
-            if is_admin:
+            if accessible_document_ids is not None:
+                if not accessible_document_ids:
+                    return []
+                placeholders = ",".join(["?"] * len(accessible_document_ids))
+                cursor.execute(query + f" WHERE id IN ({placeholders}) AND status = 'indexed' ORDER BY created_at DESC", accessible_document_ids)
+            elif is_admin:
                 cursor.execute(query + " WHERE status = 'indexed' ORDER BY created_at DESC")
             elif owner_id is not None:
                 cursor.execute(query + " WHERE owner_id = ? AND status = 'indexed' ORDER BY created_at DESC", (owner_id,))
@@ -992,6 +1147,9 @@ class AegisRagService:
                     "chunk_count": r["chunk_count"],
                     "owner_id": r["owner_id"],
                     "owner_username": r["owner_username"],
+                    "owner_department_id": r["owner_department_id"] if "owner_department_id" in r.keys() else None,
+                    "owner_department_name": r["owner_department_name"] if "owner_department_name" in r.keys() else None,
+                    "visibility": r["visibility"] if "visibility" in r.keys() else "PRIVATE",
                     "status": r["status"],
                     "ingested_at": r["created_at"],
                     "uploaded_at": r["created_at"],
@@ -1013,7 +1171,8 @@ class AegisRagService:
             cursor.execute("""
                 SELECT id, filename, source_path, content_hash, file_size, mime_type,
                        document_type, category, extraction_method, metadata_json,
-                       chunk_count, owner_id, owner_username, status, created_at, updated_at
+                       chunk_count, owner_id, owner_username, owner_department_id,
+                       owner_department_name, visibility, status, created_at, updated_at
                 FROM documents
                 WHERE id = ?
             """, (doc_id,))
@@ -1043,20 +1202,51 @@ class AegisRagService:
                 "chunk_count": r["chunk_count"],
                 "owner_id": r["owner_id"],
                 "owner_username": r["owner_username"],
+                "owner_department_id": r.get("owner_department_id"),
+                "owner_department_name": r.get("owner_department_name"),
+                "visibility": r.get("visibility", "PRIVATE"),
                 "status": r["status"],
                 "ingested_at": r["created_at"],
-                "uploaded_at": r["created_at"]
+                "uploaded_at": r["created_at"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"]
             }
         finally:
             conn.close()
 
-    def get_document_stats(self, owner_id: Optional[int] = None, is_admin: bool = False) -> Dict[str, Any]:
+    def get_document_stats(
+        self, 
+        accessible_document_ids: Optional[Any] = None,
+        owner_id: Optional[int] = None, 
+        is_admin: bool = False
+    ) -> Dict[str, Any]:
         """Calculates exact count of documents, chunks, and storage bytes from authoritative SQLite registry."""
+        if isinstance(accessible_document_ids, int):
+            owner_id = accessible_document_ids
+            accessible_document_ids = None
+
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         try:
             cursor = conn.cursor()
-            if is_admin:
+            if accessible_document_ids is not None:
+                if not accessible_document_ids:
+                    return {
+                        "total_documents": 0,
+                        "indexed_documents": 0,
+                        "failed_documents": 0,
+                        "processing_documents": 0,
+                        "total_chunks": 0,
+                        "total_file_size": 0
+                    }
+                placeholders = ",".join(["?"] * len(accessible_document_ids))
+                cursor.execute(f"SELECT COUNT(*), COALESCE(SUM(chunk_count), 0), COALESCE(SUM(file_size), 0) FROM documents WHERE id IN ({placeholders}) AND status = 'indexed'", accessible_document_ids)
+                indexed_row = cursor.fetchone()
+                cursor.execute(f"SELECT COUNT(*) FROM documents WHERE id IN ({placeholders}) AND status = 'failed'", accessible_document_ids)
+                failed_count = cursor.fetchone()[0]
+                cursor.execute(f"SELECT COUNT(*) FROM documents WHERE id IN ({placeholders}) AND status = 'processing'", accessible_document_ids)
+                processing_count = cursor.fetchone()[0]
+            elif is_admin:
                 cursor.execute("SELECT COUNT(*), COALESCE(SUM(chunk_count), 0), COALESCE(SUM(file_size), 0) FROM documents WHERE status = 'indexed'")
                 indexed_row = cursor.fetchone()
                 cursor.execute("SELECT COUNT(*) FROM documents WHERE status = 'failed'")

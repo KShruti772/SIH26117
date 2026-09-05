@@ -33,13 +33,18 @@ VALID_ACTIONS = {
 
     # Model Operations
     "MODEL_LOAD",
+    "MODEL_LOAD_STARTED",
+    "MODEL_LOADED",
     "MODEL_UNLOAD",
+    "MODEL_UNLOAD_STARTED",
+    "MODEL_UNLOADED",
     "MODEL_SWITCH",
     "MODEL_SELECTED",
     "MODEL_TESTED",
-    "MODEL_LOADED",
-    "MODEL_UNLOADED",
     "MODEL_INFERENCE",
+    "MODEL_INFERENCE_STARTED",
+    "MODEL_INFERENCE_COMPLETED",
+    "MODEL_INFERENCE_FAILED",
     "MODEL_ROUTED",
 
     # RAG Actions
@@ -55,6 +60,11 @@ VALID_ACTIONS = {
     "DOCUMENT_INDEXED",
     "DOCUMENT_DELETED",
     "DOCUMENT_ACCESS_DENIED",
+    "DOCUMENT_ACCESS_GRANTED",
+    "DOCUMENT_ACCESS_REVOKED",
+    "DOCUMENT_SHARED",
+    "DOCUMENT_DUPLICATE_DETECTED",
+    "DOCUMENT_ANALYZED",
     "DOCUMENT_UPLOAD_STARTED",
     "DOCUMENT_UPLOAD_COMPLETED",
     "DOCUMENT_UPLOAD_FAILED",
@@ -72,6 +82,7 @@ VALID_ACTIONS = {
     "SANDBOX_EXECUTION_STARTED",
     "SANDBOX_EXECUTION_COMPLETED",
     "SANDBOX_EXECUTION_FAILED",
+    "SANDBOX_FILE_CREATED",
     "DOCUMENT_GENERATION",
     "DOCUMENT_GENERATED",
     "DOCUMENT_GENERATION_STARTED",
@@ -82,11 +93,27 @@ VALID_ACTIONS = {
     "DOCUMENT_DOWNLOAD_COMPLETED",
     "DOCUMENT_DOWNLOAD_FAILED",
     "AGENT_EXECUTION",
+    "AGENT_PLAN_CREATED",
+    "AGENT_REPLAN",
+    "AGENT_COMPLETED",
+    "AGENT_FAILED",
+    "PLAN_CREATED",
+    "PLAN_STEP_STARTED",
+    "PLAN_STEP_COMPLETED",
+    "PLAN_STEP_FAILED",
+    "PLAN_REPLAN_STARTED",
+    "PLAN_REPLAN_COMPLETED",
+    "PLAN_VERIFICATION",
+    "PLAN_COMPLETED",
+    "PLAN_FAILED",
+    "TOOL_EXECUTION_STARTED",
+    "TOOL_EXECUTION_COMPLETED",
+    "TOOL_EXECUTION_FAILED",
     "CHAT_REQUEST",
     "CHAT_RESPONSE",
     "VERIFICATION",
 
-    # User Administration & System Security
+    # User Administration, Departments & System Security
     "ADMIN_OPERATION",
     "USER_PROVISION",
     "USER_PROVISIONED",
@@ -99,16 +126,24 @@ VALID_ACTIONS = {
     "USER_DISABLED",
     "USER_ENABLED",
     "USER_STATUS_UPDATED",
+    "USER_DEPARTMENT_CHANGED",
+    "DEPARTMENT_CREATED",
+    "DEPARTMENT_UPDATED",
+    "DEPARTMENT_DEACTIVATED",
     "SECURITY_CONFIGURATION_CHANGE",
     "AUTHORIZATION_DENIED",
+    "AUTHORIZATION_FAILURE",
 
-    # Conversation Actions
+    # Conversation & Context Actions
     "CONVERSATION_CREATED",
     "CONVERSATION_UPDATED",
     "CONVERSATION_DELETED",
     "CONVERSATION_MESSAGE_CREATED",
     "CHAT_CONVERSATION_CREATED",
-    "CHAT_MESSAGE_CREATED"
+    "CHAT_MESSAGE_CREATED",
+    "CONTEXT_RETRIEVED",
+    "CONTEXT_TRUNCATED",
+    "TASK_CONTEXT_RESOLVED"
 }
 
 # Allowed status taxonomy
@@ -120,9 +155,11 @@ VALID_STATUSES = {
 # Allowed metadata keys allowlist to prevent leaks
 ALLOWED_METADATA_KEYS = {
     "model_id",
+    "model",
     "capability",
     "duration_ms",
     "status",
+    "result",
     "error_category",
     "filename",
     "file_size",
@@ -133,6 +170,9 @@ ALLOWED_METADATA_KEYS = {
     "sandbox_exit_code",
     "sandbox_timeout",
     "step_id",
+    "step_type",
+    "step_count",
+    "observation",
     "reasons",
     "reason",
     "allowed_roles",
@@ -156,6 +196,22 @@ ALLOWED_METADATA_KEYS = {
     "success",
     "id",
     "document_id",
+    "artifact_id",
+    "file_id",
+    "run_id",
+    "execution_id",
+    "conversation_id",
+    "output_format",
+    "format",
+    "mime_type",
+    "target_format",
+    "source_format",
+    "source_count",
+    "source_document_ids",
+    "source_filename",
+    "resource_type",
+    "resource_id",
+    "content_hash",
     "error",
     "error_detail",
     "query",
@@ -164,9 +220,12 @@ ALLOWED_METADATA_KEYS = {
     "latency_ms",
     "rag_used",
     "verification",
+    "verification_status",
+    "tools_used",
+    "execution_status",
+    "artifacts_count",
     "message_id",
     "feature",
-    "execution_id",
     "language",
     "code_hash",
     "stdout",
@@ -176,7 +235,62 @@ ALLOWED_METADATA_KEYS = {
     "switched",
     "fallback_used",
     "required_capabilities",
-    "matched_capabilities"
+    "matched_capabilities",
+    "context_messages_used",
+    "context_documents_used",
+    "context_artifacts_used",
+    "context_truncated",
+    "context_token_estimate",
+    "memory_source_count",
+    "resolution_type",
+    "target_doc_id",
+    "target_artifact_id",
+    "initial_model",
+    "routing_reason",
+    "load_status",
+    "inference_model",
+    "lines_count",
+    "script_filename",
+    "exit_code",
+    "department_id",
+    "department_name",
+    "plan_id",
+    "total_steps",
+    "current_step",
+    "planning_budget",
+    "verification_state",
+    "goal",
+    "action_type",
+    "evidence_count",
+    "failure_category",
+    "previous_department",
+    "target_department_id",
+    "target_department_name",
+    "target_user_id",
+    "granted_to_user",
+    "granted_to_department",
+    "visibility",
+    "permission",
+    "permission_id",
+    "duplicate_of",
+    "duplicate_detected",
+    "canonical_document_id",
+    "timed_out"
+}
+
+# Forbidden substring patterns in keys/values (defense in depth)
+FORBIDDEN_PATTERNS = {
+    "password",
+    "passhash",
+    "token",
+    "auth_token",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "api_key",
+    "bearer",
+    "authorization_header",
+    "private_key",
 }
 
 def get_request_id() -> str:
@@ -238,19 +352,51 @@ class AuditLogger:
             except Exception:
                 pass
 
-        # 3. Sanitize metadata (strictly allowlist keys, exclude prompts/tokens/hashes)
+        # 3. Sanitize metadata (strictly allowlist keys, exclude confidential prompts/tokens/secrets)
         sanitized_meta = {}
-        if metadata:
+        if metadata and isinstance(metadata, dict):
             for k, v in metadata.items():
                 if k in ALLOWED_METADATA_KEYS:
-                    sanitized_meta[k] = v
+                    k_str = str(k).lower()
+                    if any(p in k_str for p in FORBIDDEN_PATTERNS):
+                        continue
+                    # Value bounding and security inspection
+                    if isinstance(v, str):
+                        v_lower = v.lower()
+                        # Reject strings that look like Bearer tokens, JWTs, or API keys
+                        if (v_lower.startswith("bearer ") or 
+                            v_lower.startswith("sk-") or 
+                            v_lower.startswith("ghp_") or 
+                            v_lower.startswith("eyjhbgci") or 
+                            v_lower.startswith("api_key_") or
+                            v_lower.startswith("sec_key_")):
+                            continue
+                        sanitized_meta[k] = v
+                    elif isinstance(v, (int, float, bool)) or v is None:
+                        sanitized_meta[k] = v
+                    elif isinstance(v, list):
+                        sanitized_meta[k] = [
+                            x for x in v[:25] 
+                            if not (isinstance(x, str) and (x.lower().startswith("bearer ") or "eyj" in x.lower()))
+                        ]
+                    elif isinstance(v, dict):
+                        sanitized_meta[k] = {
+                            sk: sv
+                            for sk, sv in list(v.items())[:15]
+                            if sk in ALLOWED_METADATA_KEYS and not any(p in str(sk).lower() for p in FORBIDDEN_PATTERNS)
+                        }
+                    else:
+                        sanitized_meta[k] = str(v)
                     
-        # Limit metadata size
+        # Limit metadata size & serialize
         serialized_meta = None
         if sanitized_meta:
-            serialized_meta = json.dumps(sanitized_meta, default=str)
-            if len(serialized_meta) > 1000:
-                serialized_meta = serialized_meta[:997] + "..."
+            try:
+                serialized_meta = json.dumps(sanitized_meta, default=str)
+                if len(serialized_meta) > 1000:
+                    serialized_meta = serialized_meta[:997] + "..."
+            except Exception:
+                serialized_meta = None
 
         # 4. Insert into database with HMAC-SHA256 hash chaining for cryptographic tamper-evidence
         try:

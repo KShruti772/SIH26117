@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { Drawer } from "antd";
 import Sidebar, { TabId } from "../components/layout/Sidebar";
 import AppShell from "../components/layout/AppShell";
 import AuthGuard from "../components/layout/AuthGuard";
@@ -24,6 +25,7 @@ import { useAuth } from "../components/providers/AuthProvider";
 import Card from "../components/ui/Card";
 import StatusBadge from "../components/ui/StatusBadge";
 import Button from "../components/ui/Button";
+import SafeMarkdown from "../components/ui/SafeMarkdown";
 import DashboardView from "../components/views/DashboardView";
 import AboutView from "../components/views/AboutView";
 import SettingsView from "../components/views/SettingsView";
@@ -34,6 +36,7 @@ import SandboxView, { SandboxHistoryItem } from "../components/views/SandboxView
 import HistoryView, { KnowledgeHistoryItem } from "../components/views/HistoryView";
 import ChatSidebar from "../components/views/ChatSidebar";
 import AuditRecordDrawer from "../components/views/AuditRecordDrawer";
+import AssistantContextPanel from "../components/views/assistant/AssistantContextPanel";
 import { 
   ShieldCheck, 
   Bot, 
@@ -75,7 +78,8 @@ import {
   LayoutDashboard,
   Unlock,
   Code,
-  Download
+  Download,
+  Play
 } from "lucide-react";
 
 interface Message {
@@ -501,6 +505,7 @@ export default function Home() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [conversationsLoading, setConversationsLoading] = useState<boolean>(false);
   const [conversationsError, setConversationsError] = useState<string | null>(null);
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
 
   // Cross-workspace history states
   const [sandboxHistory, setSandboxHistory] = useState<SandboxHistoryItem[]>([]);
@@ -599,8 +604,8 @@ export default function Home() {
     }
   };
 
-  const handleDeleteConversation = async (sessionId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleDeleteConversation = async (sessionId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
     try {
       await chatApi.deleteConversation(sessionId);
       if (activeSessionId === sessionId) {
@@ -708,8 +713,8 @@ export default function Home() {
     }
   };
 
-  const handleUploadFile = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleUploadFile = async (e?: React.FormEvent, visibility: string = "PRIVATE") => {
+    if (e && e.preventDefault) e.preventDefault();
     if (!selectedFile || uploading) return;
 
     setUploading(true);
@@ -723,12 +728,12 @@ export default function Home() {
       await new Promise(r => setTimeout(r, 150));
       
       setUploadProgressStage("EMBEDDING");
-      const doc = await ragApi.ingestDocument(selectedFile);
+      const doc = await ragApi.ingestDocument(selectedFile, visibility);
       
       setUploadProgressStage("CHROMADB COMMIT");
       await new Promise(r => setTimeout(r, 150));
       
-      setUploadSuccess(`Ingested and indexed '${selectedFile.name}' successfully into local ChromaDB.`);
+      setUploadSuccess(`Ingested and indexed '${selectedFile.name}' successfully into local ChromaDB with ${visibility} visibility.`);
       setSelectedFile(null);
       loadDocuments();
     } catch (err: any) {
@@ -1004,21 +1009,13 @@ export default function Home() {
       }
 
       case "chat": {
-        const isRAGAvailable = healthStatus?.services.rag_engine === "healthy";
-        const isAIRuntimeHealthy = healthStatus?.services.ai_runtime === "healthy";
-
-        const filteredConversations = conversations.filter(c => 
-          !docSearchQuery.trim() || 
-          (c.title && c.title.toLowerCase().includes(docSearchQuery.toLowerCase()))
-        );
-
         const activeSession = conversations.find(c => c.id === activeSessionId);
         const activeModelDisplay = currentModel?.display_name || currentModel?.model_id || "No active model reported";
 
         return (
           <div className="aegis-operational-view aegis-assistant-view space-y-6 font-sans max-w-[1600px] mx-auto pb-6">
-            {/* TOP ASSISTANT HEADER BAR */}
-            <div className="bg-[#0d1322]/90 border border-slate-800/80 backdrop-blur-xl rounded-2xl p-6 sm:p-7 flex flex-col lg:flex-row lg:items-center justify-between gap-6 shadow-xl">
+            {/* Assistant identity and only the two persistent deployment signals. */}
+            <div className="bg-[#0d1322]/90 border border-slate-800/80 rounded-xl p-5 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="space-y-1.5">
                 <div className="flex items-center space-x-3">
                   <div className="h-10 w-10 rounded-xl bg-blue-500/10 border border-blue-500/25 flex items-center justify-center text-blue-400 shrink-0 shadow-lg shadow-blue-500/5">
@@ -1028,71 +1025,82 @@ export default function Home() {
                     <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-100">
                       AI Assistant
                     </h1>
-                    <p className="text-xs text-slate-400 leading-relaxed mt-0.5">
+                    <p className="aegis-secondary-copy mt-0.5">
                       Secure local reasoning and grounded organizational knowledge access.
                     </p>
                   </div>
                 </div>
               </div>
 
-              {/* COMPACT SUBSYSTEM STATUS PILLS */}
-              <div className="flex flex-wrap items-center gap-2.5 text-xs">
-                <span className="px-3 py-1.5 bg-blue-500/10 border border-blue-500/25 text-blue-300 rounded-lg text-[11px] font-semibold flex items-center space-x-1.5">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="px-2.5 py-1 bg-blue-500/10 border border-blue-500/25 text-blue-300 rounded-md text-[11px] font-semibold flex items-center space-x-1.5">
                   <span className="h-2 w-2 rounded-full bg-blue-400" />
-                  <span>LOCAL INFERENCE</span>
+                  <span>LOCAL</span>
                 </span>
-                <span className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold flex items-center space-x-1.5 border ${
-                  isRAGAvailable 
-                    ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/25" 
-                    : "bg-amber-500/10 text-amber-300 border-amber-500/25"
-                }`}>
-                  <span className={`h-2 w-2 rounded-full ${isRAGAvailable ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
-                  <span>{isRAGAvailable ? "RAG ONLINE" : "RAG DEGRADED"}</span>
-                </span>
-                <span className="px-3 py-1.5 bg-indigo-500/10 border border-indigo-500/25 text-indigo-300 rounded-lg text-[11px] font-semibold flex items-center space-x-1.5">
+                <span className="px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/25 text-indigo-300 rounded-md text-[11px] font-semibold flex items-center space-x-1.5">
                   <span className="h-2 w-2 rounded-full bg-indigo-400" />
                   <span>AIR-GAPPED</span>
-                </span>
-                <span className="px-3 py-1.5 bg-purple-500/10 border border-purple-500/25 text-purple-300 rounded-lg text-[11px] font-semibold flex items-center space-x-1.5">
-                  <span className="h-2 w-2 rounded-full bg-purple-400" />
-                  <span>CLOUD DISABLED</span>
                 </span>
               </div>
             </div>
 
-            {/* 3-ZONE DESKTOP LAYOUT */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-14rem)] min-h-[600px]">
-              
-              {/* ZONE 1 (LEFT): CONVERSATION PANEL */}
-              <div className="lg:col-span-3 h-full overflow-hidden">
-                <ChatSidebar
-                  conversations={conversations}
-                  activeSessionId={activeSessionId}
-                  loading={conversationsLoading}
-                  error={conversationsError}
-                  onSelectConversation={handleSelectConversation}
-                  onNewConversation={handleNewConversation}
-                  onDeleteConversation={handleDeleteConversation}
-                  onRetry={loadConversations}
-                  searchQuery={docSearchQuery}
-                  setSearchQuery={setDocSearchQuery}
-                />
-              </div>
+            <Drawer
+              title="Conversations"
+              placement="left"
+              open={historyDrawerOpen}
+              onClose={() => setHistoryDrawerOpen(false)}
+              size={360}
+              className="aegis-conversation-drawer"
+              styles={{ body: { padding: 0 } }}
+            >
+              <ChatSidebar
+                title={null}
+                conversations={conversations}
+                activeSessionId={activeSessionId}
+                loading={conversationsLoading}
+                error={conversationsError}
+                onSelectConversation={(sessionId) => {
+                  void handleSelectConversation(sessionId);
+                  setHistoryDrawerOpen(false);
+                }}
+                onNewConversation={() => {
+                  void handleNewConversation();
+                  setHistoryDrawerOpen(false);
+                }}
+                onDeleteConversation={handleDeleteConversation}
+                onRetry={loadConversations}
+                searchQuery={docSearchQuery}
+                setSearchQuery={setDocSearchQuery}
+              />
+            </Drawer>
 
-              {/* ZONE 2 (CENTER): AI CHAT WORKSPACE */}
-              <div className="lg:col-span-6 bg-[#0d1322]/90 border border-slate-800/80 backdrop-blur-xl rounded-2xl flex flex-col overflow-hidden shadow-xl">
+            {/* Conversation is primary; history is available through the drawer above. */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:h-[calc(100vh-12.5rem)] lg:min-h-[600px]">
+
+              {/* Conversation workspace */}
+              <div className="lg:col-span-10 bg-[#0d1322]/90 border border-slate-800/80 rounded-xl flex flex-col overflow-hidden min-h-[600px]">
                 {/* Active Session Sub-Header Bar */}
                 <div className="px-6 py-3.5 border-b border-slate-800/80 bg-[#090e1a]/90 flex items-center justify-between shrink-0">
                   <div className="flex items-center space-x-2.5 truncate">
                     <Bot className="h-4.5 w-4.5 text-blue-400 shrink-0" />
                     <span className="text-xs font-bold text-slate-100 truncate">
-                      {activeSession?.title || "No conversation selected"}
+                      {activeSession?.title || "New conversation"}
                     </span>
                   </div>
 
-                  <div className="flex items-center space-x-2">
-                    <span className="px-2.5 py-1 bg-blue-500/10 border border-blue-500/20 text-blue-300 rounded-md text-[10px] font-bold tracking-wide uppercase font-mono">
-                      LOCAL MODEL {activeModelDisplay}
+                  <div className="flex items-center space-x-3">
+                    <button
+                      type="button"
+                      onClick={() => setHistoryDrawerOpen(true)}
+                      className="aegis-assistant-history-trigger"
+                      aria-label="Open conversation history"
+                      title="Open conversation history"
+                    >
+                      <History className="h-3.5 w-3.5" />
+                      <span>History</span>
+                    </button>
+                    <span className="text-[11px] text-slate-400 truncate max-w-[170px]" title={activeModelDisplay}>
+                      {activeModelDisplay}
                     </span>
                   </div>
                 </div>
@@ -1146,62 +1154,57 @@ export default function Home() {
                           <div key={msg.id} className={`flex flex-col space-y-1.5 ${isUser ? "items-end" : "items-start"}`}>
                             <div className="flex items-center space-x-2 text-[11px] font-semibold text-slate-400 px-1">
                               <span className={isUser ? "text-blue-400 font-bold" : "text-emerald-400 font-bold"}>
-                                {isUser ? "OPERATOR" : "AEGIS"}
+                                {isUser ? "YOU" : "AEGIS"}
                               </span>
                               <span>•</span>
                               <span className="font-mono text-[10px] text-slate-500">{msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                             </div>
 
-                            <div className={`p-5 rounded-2xl border text-xs leading-relaxed max-w-[90%] sm:max-w-[85%] shadow-lg ${
+                            <div className={`max-w-[92%] sm:max-w-[88%] ${
                               isUser 
-                                ? "bg-blue-600/10 border-blue-500/20 text-slate-100 font-sans" 
-                                : "bg-[#090e1a] border-slate-800/90 text-slate-100 font-sans space-y-4"
+                                ? "aegis-assistant-user-message text-slate-100 font-sans"
+                                : "aegis-assistant-response text-slate-100 font-sans"
                             }`}>
                               {msg.status === "sending" ? (
                                 <div className="flex items-center space-x-3 text-blue-400 p-2 font-sans text-xs">
                                   <RefreshCw className="h-4 w-4 animate-spin text-blue-400 shrink-0" />
                                   <div className="space-y-0.5">
-                                    <div className="font-semibold text-slate-200">Analyzing query & generating grounded response…</div>
-                                    <div className="text-[11px] text-slate-400">Local inference on {activeModelDisplay}</div>
+                                    <div className="font-semibold text-slate-200">AEGIS is working…</div>
+                                    <div className="text-[11px] text-slate-400">Local request in progress</div>
                                   </div>
                                 </div>
                               ) : msg.status === "error" ? (
                                 <div className="space-y-2 text-xs text-rose-300 font-sans">
                                   <div className="flex items-center space-x-2 font-bold text-rose-400">
                                     <AlertCircle className="h-4.5 w-4.5 shrink-0" />
-                                    <span>Agent Execution Fault</span>
+                                    <span>Unable to complete this request.</span>
                                   </div>
                                   <p className="text-slate-300 leading-relaxed">{msg.content}</p>
                                 </div>
                               ) : (
                                 <>
-                                  {/* Grounded Badge Header */}
+                                  {/* Answer status is concise; routing detail stays below the answer. */}
                                   {!isUser && (
-                                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-2.5 text-xs">
-                                      <div className="flex items-center space-x-2">
-                                        <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${
-                                          msg.rag_used 
-                                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" 
-                                            : "bg-amber-500/10 text-amber-300 border-amber-500/30"
-                                        }`}>
-                                          {msg.rag_used ? "GROUNDED" : "GENERAL REASONING"}
-                                        </span>
-                                      </div>
-                                      
-                                      <span className="text-[10px] text-slate-400 font-mono">
-                                        Model: <span className="text-blue-400 font-bold">{msg.model_id || activeModelDisplay}</span>
-                                      </span>
+                                    <div className="aegis-assistant-response-status">
+                                      <CheckCircle2 className={`h-3.5 w-3.5 shrink-0 ${msg.rag_used ? "text-emerald-400" : "text-slate-400"}`} />
+                                      <span>{msg.rag_used ? "Grounded in authorized documents" : "General reasoning"}</span>
                                     </div>
                                   )}
 
-                                  {/* Sandbox Execution Specialized Card */}
+                                  <div className="aegis-assistant-answer">
+                                    {isUser ? msg.content : <SafeMarkdown content={msg.content} />}
+                                  </div>
+
+                                  {/* Sandbox material is retained but does not displace the answer. */}
                                   {!isUser && (msg.sandbox_execution || msg.metadata?.sandbox_execution) ? (
                                     (() => {
                                       const sb = msg.sandbox_execution || msg.metadata?.sandbox_execution;
                                       const isSuccess = sb.status === "SUCCESS" || sb.success;
                                       const artifacts = sb.artifacts || [];
                                       return (
-                                        <div className="space-y-3">
+                                        <details className="aegis-assistant-details">
+                                          <summary>Sandbox execution {isSuccess ? "completed" : "failed"}</summary>
+                                          <div className="space-y-3 pt-3">
                                           {/* Generated Code Section */}
                                           {sb.code && (
                                             <div className="space-y-1.5">
@@ -1210,6 +1213,17 @@ export default function Home() {
                                                   <Code className="h-3.5 w-3.5 text-blue-400" />
                                                   <span>GENERATED PYTHON CODE</span>
                                                 </span>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    setSandboxCode(sb.code);
+                                                    setActiveTab("sandbox");
+                                                  }}
+                                                  className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center space-x-1 cursor-pointer bg-blue-500/10 hover:bg-blue-500/20 px-2 py-0.5 rounded transition-all font-sans"
+                                                >
+                                                  <Play className="h-3 w-3" />
+                                                  <span>Open in Sandbox</span>
+                                                </button>
                                               </div>
                                               <pre className="p-3 bg-[#060a14] border border-slate-800/90 rounded-xl text-xs font-mono text-emerald-300 overflow-x-auto whitespace-pre leading-relaxed">
                                                 <code>{sb.code}</code>
@@ -1218,7 +1232,7 @@ export default function Home() {
                                           )}
 
                                           {/* Real Sandbox Execution Telemetry Card */}
-                                          <div className={`p-3.5 rounded-xl border font-mono text-xs space-y-2.5 ${
+                                            <div className={`p-3 rounded-lg border font-mono text-xs space-y-2 ${
                                             isSuccess 
                                               ? "bg-[#060e18]/90 border-emerald-500/30" 
                                               : "bg-[#180808]/90 border-red-500/30"
@@ -1227,8 +1241,13 @@ export default function Home() {
                                               <div className="flex items-center space-x-2">
                                                 <Terminal className={`h-4 w-4 ${isSuccess ? "text-emerald-400" : "text-red-400"}`} />
                                                 <span className="font-bold text-[11px] uppercase tracking-wide text-slate-200">
-                                                  REAL SANDBOX EXECUTION
+                                                  SANDBOX EXECUTION
                                                 </span>
+                                                {sb.filename && (
+                                                  <span className="px-2 py-0.5 rounded bg-blue-950/60 text-blue-300 text-[10px] font-mono border border-blue-800/60">
+                                                    File: {sb.filename}
+                                                  </span>
+                                                )}
                                               </div>
                                               <div className="flex items-center space-x-2">
                                                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
@@ -1237,11 +1256,11 @@ export default function Home() {
                                                   {sb.status || (isSuccess ? "SUCCESS" : "FAILED")}
                                                 </span>
                                                 <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[10px] font-bold">
-                                                  Exit: {sb.exit_code}
+                                                  Exit code: {sb.exit_code}
                                                 </span>
                                                 {sb.duration_ms !== undefined && (
                                                   <span className="text-[10px] text-slate-400">
-                                                    {sb.duration_ms}ms
+                                                    Duration: {sb.duration_ms} ms
                                                   </span>
                                                 )}
                                               </div>
@@ -1300,27 +1319,24 @@ export default function Home() {
                                               </div>
                                             )}
                                           </div>
-                                        </div>
+                                          </div>
+                                        </details>
                                       );
                                     })()
-                                  ) : (
-                                    /* Default Answer Content */
-                                    <div className="whitespace-pre-wrap leading-relaxed text-slate-200 text-[13px]">
-                                      {msg.content}
-                                    </div>
-                                  )}
+                                  ) : null}
 
                                   {/* Clean Sources List */}
                                   {!isUser && msg.sources && msg.sources.length > 0 && (
                                     <div className="border-t border-slate-800/80 pt-3 space-y-2 text-xs">
                                       <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                                        Sources:
+                                        Sources
                                       </div>
                                       <div className="space-y-1">
-                                        {Array.from(new Set(msg.sources.map((s) => `${s.filename} — Page ${s.page_number}`))).map((srcStr, idx) => (
-                                          <div key={idx} className="flex items-center space-x-2 text-slate-300 text-xs font-mono">
+                                        {Array.from(new Map(msg.sources.map((source) => [`${source.filename}-${source.page_number}`, source])).values()).map((source, idx) => (
+                                          <div key={idx} className="flex items-center space-x-2 text-slate-300 text-xs">
                                             <span className="text-blue-400">•</span>
-                                            <span>{srcStr}</span>
+                                            <span>{source.filename}</span>
+                                            {Number.isFinite(source.page_number) && <span className="aegis-technical-metadata">Page {source.page_number}</span>}
                                           </div>
                                         ))}
                                       </div>
@@ -1335,7 +1351,7 @@ export default function Home() {
                                             <div key={idx} className="p-3 bg-[#080d1a] border border-slate-800/80 rounded-lg space-y-1 text-xs">
                                               <div className="flex items-center justify-between text-[11px] font-semibold text-blue-300 border-b border-slate-800/80 pb-1">
                                                 <span>{src.filename}</span>
-                                                <span className="text-slate-400 font-mono text-[10px]">Page {src.page_number}</span>
+                                                {Number.isFinite(src.page_number) && <span className="text-slate-400 font-mono text-[10px]">Page {src.page_number}</span>}
                                               </div>
                                               {src.text && (
                                                 <p className="text-slate-300 text-[11px] italic leading-relaxed pt-1 whitespace-pre-wrap">
@@ -1349,52 +1365,21 @@ export default function Home() {
                                     </div>
                                   )}
 
-                                  {/* AEGIS Execution Information Telemetry Card */}
+                                  {/* Technical telemetry is preserved only when supplied by the backend. */}
                                   {!isUser && (
-                                    <div className="mt-3 pt-3 border-t border-slate-800/80 text-[11px] font-mono">
-                                      <div className="flex items-center space-x-1.5 text-slate-400 font-bold uppercase tracking-wider text-[10px] mb-2">
-                                        <Cpu className="h-3 w-3 text-blue-400" />
-                                        <span>AEGIS EXECUTION</span>
-                                      </div>
-                                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 bg-[#060a14] p-2.5 rounded-xl border border-slate-800/70">
-                                        <div>
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold">Task</span>
-                                          <span className="text-slate-200 font-semibold">{formatTaskType(msg.task_type || msg.routing_info?.task_type)}</span>
-                                        </div>
-                                        <div>
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold">Model</span>
-                                          <span className="text-blue-400 font-semibold">{msg.model_id || msg.routing_info?.selected_model || activeModelDisplay}</span>
-                                        </div>
-                                        <div>
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold">Routing</span>
-                                          <span className="text-emerald-400 font-semibold">Automatic</span>
-                                        </div>
-                                        <div>
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold">
-                                            {msg.task_type === "CODING" || msg.task_type === "CALCULATION" ? "Sandbox" : (msg.task_type === "VISION_ANALYSIS" ? "Vision" : "RAG")}
-                                          </span>
-                                          <span className="text-slate-300 font-semibold">
-                                            {msg.task_type === "CODING" || msg.task_type === "CALCULATION"
-                                              ? ((msg.sandbox_execution || msg.metadata?.sandbox_execution)?.success
-                                                  ? "Executed ✓"
-                                                  : ((msg.sandbox_execution || msg.metadata?.sandbox_execution)
-                                                      ? `Failed (Exit ${(msg.sandbox_execution || msg.metadata?.sandbox_execution).exit_code})`
-                                                      : "Executed ✓"))
-                                              : (msg.task_type === "VISION_ANALYSIS"
-                                                  ? "Supported ✓"
-                                                  : (msg.rag_used ? "Grounded ✓" : "General Reasoning"))}
-                                          </span>
-                                        </div>
-                                        <div>
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold">Model Switch</span>
-                                          <span className="text-slate-300 font-semibold">{msg.routing_info?.switched ? "Yes" : "No"}</span>
-                                        </div>
-                                        <div>
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold">Execution</span>
-                                          <span className="text-indigo-400 font-semibold">Local Workstation</span>
-                                        </div>
-                                      </div>
-                                    </div>
+                                    (msg.task_type || msg.routing_info?.task_type || msg.model_id || msg.routing_info?.selected_model || msg.routing_info?.routing || msg.routing_info?.rag_used !== undefined || msg.rag_used !== undefined || msg.sandbox_execution || msg.metadata?.sandbox_execution || msg.duration_ms !== undefined) && (
+                                      <details className="aegis-assistant-details">
+                                        <summary>Execution details</summary>
+                                        <dl className="aegis-assistant-telemetry-grid">
+                                          {(msg.task_type || msg.routing_info?.task_type) && <><dt>Task</dt><dd>{formatTaskType(msg.task_type || msg.routing_info?.task_type)}</dd></>}
+                                          {(msg.model_id || msg.routing_info?.selected_model) && <><dt>Model</dt><dd>{msg.model_id || msg.routing_info?.selected_model}</dd></>}
+                                          {msg.routing_info?.routing && <><dt>Routing</dt><dd>{msg.routing_info.routing}</dd></>}
+                                          {(msg.rag_used !== undefined || msg.routing_info?.rag_used !== undefined) && <><dt>RAG</dt><dd>{(msg.rag_used ?? msg.routing_info?.rag_used) ? "Grounded" : "Not used"}</dd></>}
+                                          {(msg.sandbox_execution || msg.metadata?.sandbox_execution) && <><dt>Sandbox</dt><dd>{(msg.sandbox_execution || msg.metadata?.sandbox_execution)?.success ? "Completed" : "Failed"}</dd></>}
+                                          {msg.duration_ms !== undefined && <><dt>Duration</dt><dd>{msg.duration_ms} ms</dd></>}
+                                        </dl>
+                                      </details>
+                                    )
                                   )}
                                 </>
                               )}
@@ -1408,7 +1393,7 @@ export default function Home() {
                 </div>
 
                 {/* Bottom Input Composer */}
-                <div className="p-4 border-t border-slate-800/80 bg-[#090e1a]/90 shrink-0">
+                <div className="aegis-assistant-composer shrink-0">
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
@@ -1416,14 +1401,15 @@ export default function Home() {
                     }}
                     className="space-y-2"
                   >
-                    <div className="relative bg-[#080d1a] border border-slate-800 rounded-2xl p-3 focus-within:ring-2 focus-within:ring-blue-500/40 transition-all flex items-end justify-between">
+                    <div className="relative bg-[#080d1a] border border-slate-800 rounded-xl p-3 focus-within:ring-2 focus-within:ring-blue-500/40 transition-all flex items-end justify-between">
                       <textarea
                         rows={2}
                         value={inputMessage}
                         onChange={(e) => setInputMessage(e.target.value.slice(0, 1000))}
-                        placeholder="Ask AEGIS about authorized organizational knowledge..."
+                        placeholder="Ask AEGIS..."
                         disabled={chatLoading}
-                        className="w-full bg-transparent text-xs text-slate-100 placeholder-slate-500 focus:outline-none font-sans resize-none leading-relaxed pr-10"
+                        aria-label="Ask AEGIS"
+                        className="w-full bg-transparent text-sm text-slate-100 placeholder-slate-500 focus:outline-none font-sans resize-none leading-relaxed pr-10"
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && !e.shiftKey) {
                             e.preventDefault();
@@ -1440,7 +1426,7 @@ export default function Home() {
                         <button
                           type="submit"
                           disabled={!inputMessage.trim() || chatLoading}
-                          className="h-9 w-9 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white flex items-center justify-center cursor-pointer shadow-lg shadow-blue-600/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                          className="h-9 w-9 rounded-lg bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                           title="Send Message"
                           aria-label="Send Message"
                         >
@@ -1452,153 +1438,13 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* ZONE 3 (RIGHT): AI & SYSTEM INFORMATION PANEL */}
-              <div className="lg:col-span-3 space-y-5 overflow-y-auto">
-                {/* CARD 0: DOCUMENT CONTEXT */}
-                {documents.length > 0 && (
-                  <div className="bg-[#0d1322]/90 border border-slate-800/80 backdrop-blur-xl rounded-2xl p-5 shadow-xl space-y-3">
-                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
-                      <div className="flex items-center space-x-2 text-indigo-400">
-                        <Database className="h-4.5 w-4.5" />
-                        <h3 className="text-xs font-bold uppercase tracking-wide text-slate-100">DOCUMENT CONTEXT</h3>
-                      </div>
-                      <span className="px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded text-[10px] font-bold uppercase font-mono">
-                        INDEXED
-                      </span>
-                    </div>
-
-                    <div className="space-y-2 text-xs font-sans">
-                      <div className="font-bold text-slate-200 truncate" title={documents[0].filename}>
-                        {documents[0].filename}
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-slate-400 pt-1">
-                        <div className="bg-[#050811] p-2 rounded border border-slate-800/60">
-                          <span className="text-slate-500 block text-[10px]">PAGES</span>
-                          <span className="text-slate-200 font-bold">{documents[0].pages ?? documents[0].page_count ?? "—"}</span>
-                        </div>
-                        <div className="bg-[#050811] p-2 rounded border border-slate-800/60">
-                          <span className="text-slate-500 block text-[10px]">CHUNKS</span>
-                          <span className="text-blue-400 font-bold">{documents[0].chunk_count ?? documents[0].chunks ?? 0}</span>
-                        </div>
-                      </div>
-                      {documents.length > 1 && (
-                        <div className="text-[10px] text-slate-400 pt-1">
-                          + {documents.length - 1} other indexed document{documents.length > 2 ? "s" : ""}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* CARD 1: CURRENT MODEL */}
-                <div className="bg-[#0d1322]/90 border border-slate-800/80 backdrop-blur-xl rounded-2xl p-5 shadow-xl space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
-                    <div className="flex items-center space-x-2 text-blue-400">
-                      <Cpu className="h-4.5 w-4.5" />
-                      <h3 className="text-xs font-bold uppercase tracking-wide text-slate-100">CURRENT MODEL</h3>
-                    </div>
-                    <span className="text-[10px] font-bold text-emerald-400 font-mono">ACTIVE</span>
-                  </div>
-
-                  <div className="space-y-2">
-                    <span className="text-base font-extrabold text-blue-400 font-mono block truncate" title={activeModelDisplay}>
-                      {activeModelDisplay}
-                    </span>
-                    <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-slate-400">
-                      <span className="px-2 py-0.5 bg-slate-800/80 rounded border border-slate-700/60">4.3B Parameters</span>
-                      <span className="px-2 py-0.5 bg-slate-800/80 rounded border border-slate-700/60">GGUF • Q4_K_M</span>
-                    </div>
-                  </div>
-
-                  <Button
-                    variant="secondary"
-                    onClick={() => setActiveTab("models")}
-                    disabled={user?.role !== "admin"}
-                    className="w-full h-9 text-xs"
-                    title={user?.role !== "admin" ? "Admin role required to switch active models" : "Manage and select active models"}
-                  >
-                    Change Model
-                  </Button>
-                </div>
-
-                {/* CARD 2: QUICK ACTIONS */}
-                <div className="bg-[#0d1322]/90 border border-slate-800/80 backdrop-blur-xl rounded-2xl p-5 shadow-xl space-y-4">
-                  <div className="flex items-center space-x-2 text-blue-400 border-b border-slate-800/80 pb-3">
-                    <Activity className="h-4.5 w-4.5" />
-                    <h3 className="text-xs font-bold uppercase tracking-wide text-slate-100">QUICK ACTIONS</h3>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Button
-                      variant="ghost"
-                      onClick={() => setActiveTab("documents")}
-                      className="w-full justify-start h-9 text-xs text-slate-300 hover:text-white hover:bg-slate-800/60"
-                    >
-                      <Upload className="h-4 w-4 mr-2 text-blue-400" />
-                      <span>Upload Document</span>
-                    </Button>
-
-                    <Button
-                      variant="ghost"
-                      onClick={handleNewConversation}
-                      className="w-full justify-start h-9 text-xs text-slate-300 hover:text-white hover:bg-slate-800/60"
-                    >
-                      <Plus className="h-4 w-4 mr-2 text-emerald-400" />
-                      <span>Create Conversation</span>
-                    </Button>
-
-                    <Button
-                      variant="ghost"
-                      onClick={() => setActiveTab("rag")}
-                      className="w-full justify-start h-9 text-xs text-slate-300 hover:text-white hover:bg-slate-800/60"
-                    >
-                      <Database className="h-4 w-4 mr-2 text-indigo-400" />
-                      <span>Query Knowledge Base</span>
-                    </Button>
-
-                    <Button
-                      variant="ghost"
-                      onClick={() => setActiveTab("sandbox")}
-                      className="w-full justify-start h-9 text-xs text-slate-300 hover:text-white hover:bg-slate-800/60"
-                    >
-                      <Terminal className="h-4 w-4 mr-2 text-purple-400" />
-                      <span>Run Sandbox Code</span>
-                    </Button>
-                  </div>
-                </div>
-
-                {/* CARD 3: AUDIT INTEGRITY */}
-                <div className="bg-[#0d1322]/90 border border-slate-800/80 backdrop-blur-xl rounded-2xl p-5 shadow-xl space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
-                    <div className="flex items-center space-x-2 text-emerald-400">
-                      <ShieldCheck className="h-4.5 w-4.5" />
-                      <h3 className="text-xs font-bold uppercase tracking-wide text-slate-100">AUDIT INTEGRITY</h3>
-                    </div>
-                    <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                  </div>
-
-                  <div className="space-y-2 text-xs font-sans">
-                    <div className="flex justify-between items-center py-1 border-b border-slate-800/60">
-                      <span className="text-slate-400">Status:</span>
-                      <span className="font-bold text-emerald-400 uppercase font-mono">INTACT</span>
-                    </div>
-                    <div className="flex justify-between items-center py-1">
-                      <span className="text-slate-400">Last Verified:</span>
-                      <span className="text-slate-300 font-mono text-[11px]">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                    </div>
-                  </div>
-
-                  {user?.role === "admin" && (
-                    <Button
-                      variant="secondary"
-                      onClick={() => setActiveTab("audit")}
-                      className="w-full h-9 text-xs"
-                    >
-                      Verify Now
-                    </Button>
-                  )}
-                </div>
-              </div>
+              <AssistantContextPanel
+                documents={documents}
+                currentModel={currentModel}
+                isAdmin={user?.role === "admin"}
+                onOpenDocuments={() => setActiveTab("documents")}
+                onOpenModels={() => setActiveTab("models")}
+              />
             </div>
           </div>
         );
@@ -1637,6 +1483,7 @@ export default function Home() {
             error={documentsError}
             file={selectedFile}
             uploading={uploading}
+            uploadProgressStage={uploadProgressStage}
             uploadSuccess={uploadSuccess}
             uploadError={uploadError}
             search={docSearchQuery}
@@ -1646,7 +1493,12 @@ export default function Home() {
             type={docTypeFilter}
             setType={setDocTypeFilter}
             onFile={setSelectedFile}
-            onUpload={() => handleUploadFile({ preventDefault: () => {} } as React.FormEvent)}
+            onUpload={(vis?: string) => handleUploadFile(undefined, vis || "PRIVATE")}
+            currentUser={user}
+            onAnalyze={(document) => {
+              setRagSelectedDocId(document.id);
+              setActiveTab("rag");
+            }}
             onRefresh={loadDocuments}
             onReindex={handleReindex}
             onDelete={handleDelete}

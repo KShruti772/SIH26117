@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Button, Input, Skeleton, Space, Tag, Tooltip, Typography } from "antd";
+import { Button, Input, Popconfirm, Skeleton, Tooltip } from "antd";
 import {
   ClockCircleOutlined,
   DeleteOutlined,
@@ -19,10 +19,11 @@ interface ChatSidebarProps {
   error: string | null;
   onSelectConversation: (sessionId: string) => void;
   onNewConversation: () => void;
-  onDeleteConversation: (sessionId: string, e: React.MouseEvent) => void;
+  onDeleteConversation: (sessionId: string, e?: React.MouseEvent) => void;
   onRetry: () => void;
   searchQuery: string;
   setSearchQuery: (query: string) => void;
+  title?: string | null;
 }
 
 function groupConversationsByDate(conversations: ConversationSession[]): {
@@ -63,7 +64,8 @@ export default function ChatSidebar({
   onDeleteConversation,
   onRetry,
   searchQuery,
-  setSearchQuery
+  setSearchQuery,
+  title = "CONVERSATIONS"
 }: ChatSidebarProps) {
   const filtered = conversations.filter(
     (c) =>
@@ -97,9 +99,17 @@ export default function ChatSidebar({
             <div
               key={conv.id}
               onClick={() => onSelectConversation(conv.id)}
-              className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between group relative ${
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelectConversation(conv.id);
+                }
+              }}
+              role="button"
+              tabIndex={0}
+              className={`w-full p-3 rounded-lg border transition-colors cursor-pointer flex items-center justify-between group relative text-left ${
                 isActive
-                  ? "bg-blue-600/15 border-blue-500/40 text-slate-100 font-semibold shadow-md shadow-blue-500/5"
+                  ? "bg-blue-600/15 border-blue-500/40 text-slate-100 font-semibold"
                   : "bg-[#090e1a]/60 hover:bg-[#0f172a] border-slate-800/80 text-slate-300 hover:border-slate-700 font-medium"
               }`}
             >
@@ -113,23 +123,27 @@ export default function ChatSidebar({
                 </span>
                 <div className="flex items-center space-x-2 text-[10px] text-slate-400">
                   <span className="font-mono text-slate-400">{displayTime}</span>
-                  {conv.feature && conv.feature !== "chat" && (
-                    <Tag color="cyan" className="!mr-0 text-[9px] py-0 px-1 leading-normal">
-                      {conv.feature.toUpperCase()}
-                    </Tag>
-                  )}
                 </div>
               </div>
 
-              <Tooltip title="Delete conversation">
-                <button
-                  type="button"
-                  onClick={(e) => onDeleteConversation(conv.id, e)}
-                  className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 hover:text-rose-400 transition-opacity cursor-pointer rounded-lg hover:bg-rose-500/10"
-                >
-                  <DeleteOutlined className="text-xs" />
-                </button>
-              </Tooltip>
+              <Popconfirm
+                title="Delete this conversation?"
+                description="This cannot be undone."
+                okText="Delete"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => onDeleteConversation(conv.id)}
+              >
+                <Tooltip title="Delete conversation">
+                  <button
+                    type="button"
+                    onClick={(event) => event.stopPropagation()}
+                    className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 text-slate-400 hover:text-rose-400 transition-opacity cursor-pointer rounded-lg hover:bg-rose-500/10"
+                    aria-label={`Delete ${conv.title || "conversation"}`}
+                  >
+                    <DeleteOutlined className="text-xs" />
+                  </button>
+                </Tooltip>
+              </Popconfirm>
             </div>
           );
         })}
@@ -142,10 +156,7 @@ export default function ChatSidebar({
       {/* Panel Header */}
       <div className="p-4 border-b border-slate-800/80 space-y-3 bg-[#090e1a]/80 shrink-0">
         <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <MessageOutlined className="text-blue-400 text-sm" />
-            <h2 className="text-xs font-bold text-slate-200 uppercase tracking-wider">CONVERSATIONS</h2>
-          </div>
+          {title && <div className="flex items-center space-x-2"><MessageOutlined className="text-blue-400 text-sm" /><h2 className="text-xs font-bold text-slate-200 uppercase tracking-wider">{title}</h2></div>}
           <span className="text-[11px] text-slate-400 font-mono">
             {conversations.length} {conversations.length === 1 ? "session" : "sessions"}
           </span>

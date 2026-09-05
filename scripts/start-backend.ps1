@@ -29,4 +29,5 @@ Write-Host "Python    : $venvPython" -ForegroundColor Yellow
 Write-Host "Endpoint  : http://127.0.0.1:8000" -ForegroundColor Green
 Write-Host "-----------------------------------------"
 
-& $venvPython -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+& $venvPython -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir backend --reload-exclude "data*" --reload-exclude "sandbox_runs*" --reload-exclude "sandbox_runs_test*" --reload-exclude "*/data/*" --reload-exclude "*/data/**/*" --reload-exclude "*/sandbox_runs/*" --reload-exclude "*/sandbox_runs/**/*" --reload-exclude "*/sandbox_runs_test/*" --reload-exclude "*/sandbox_runs_test/**/*"
+

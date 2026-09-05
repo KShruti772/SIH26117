@@ -17,7 +17,34 @@ export interface DocumentInfo {
   extraction_method?: string;
   metadata?: Record<string, any>;
   embedding_model?: string;
+  owner_id?: number;
   owner_username?: string;
+  owner_department_id?: number;
+  owner_department_name?: string;
+  visibility?: "PRIVATE" | "DEPARTMENT" | "ORGANIZATION" | string;
+  can_download?: boolean;
+  can_share?: boolean;
+  can_delete?: boolean;
+  can_manage?: boolean;
+}
+
+export interface DocumentPermission {
+  id: number;
+  document_id: string;
+  user_id?: number;
+  user_name?: string;
+  department_id?: number;
+  department_name?: string;
+  permission: string;
+  granted_by?: number;
+  granted_by_username?: string;
+  created_at: string;
+}
+
+export interface DocumentSharePayload {
+  user_id?: number;
+  department_id?: number;
+  permission: "READ" | "DOWNLOAD" | "USE_IN_RAG" | "MANAGE" | "FULL_CONTROL" | string;
 }
 
 export interface RagSearchResult {
@@ -37,6 +64,9 @@ export interface RagSearchResult {
     is_mock?: boolean;
     owner_id?: number;
     owner_username?: string;
+    owner_department_id?: number;
+    owner_department_name?: string;
+    visibility?: string;
   };
 }
 
@@ -82,6 +112,9 @@ export interface GeneratedDocument {
   id: string;
   owner_id?: number;
   owner_username?: string;
+  owner_department_id?: number;
+  owner_department_name?: string;
+  visibility?: string;
   filename: string;
   title: string;
   format: string;
@@ -106,12 +139,13 @@ export interface KnowledgeBaseGenerationResult {
   generatedDocument: GeneratedDocument;
   sourceFilename?: string;
   query: string;
+  answer?: string;
 }
 
 export const ragApi = {
   /**
    * GET /documents
-   * Lists all indexed documents in the local vector database.
+   * Lists all indexed documents in the local vector database accessible to the current user.
    */
   async listDocuments(): Promise<DocumentInfo[]> {
     return apiFetch<DocumentInfo[]>("/documents", {
@@ -131,15 +165,58 @@ export const ragApi = {
 
   /**
    * POST /documents/upload
-   * Ingests a new document file via multipart/form-data.
+   * Ingests a new document file with specified visibility policy.
    */
-  async ingestDocument(file: File): Promise<DocumentInfo> {
+  async ingestDocument(file: File, visibility: string = "PRIVATE"): Promise<DocumentInfo> {
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("visibility", visibility);
     return apiFetch<DocumentInfo>("/documents/upload", {
       method: "POST",
       body: formData,
       timeoutMs: 180000,
+    });
+  },
+
+  /**
+   * POST /documents/:id/share
+   * Shares a document with a user or department.
+   */
+  async shareDocument(documentId: string, payload: DocumentSharePayload): Promise<DocumentPermission> {
+    return apiFetch<DocumentPermission>(`/documents/${documentId}/share`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /**
+   * GET /documents/:id/permissions
+   * Lists all permission grants on a document.
+   */
+  async listPermissions(documentId: string): Promise<DocumentPermission[]> {
+    return apiFetch<DocumentPermission[]>(`/documents/${documentId}/permissions`, {
+      method: "GET",
+    });
+  },
+
+  /**
+   * DELETE /documents/:id/share/:permId
+   * Revokes a permission grant from a document.
+   */
+  async revokePermission(documentId: string, permissionId: number): Promise<{ status: string; message: string }> {
+    return apiFetch<{ status: string; message: string }>(`/documents/${documentId}/share/${permissionId}`, {
+      method: "DELETE",
+    });
+  },
+
+  /**
+   * PATCH /documents/:id/visibility
+   * Updates document visibility policy (PRIVATE, DEPARTMENT, ORGANIZATION).
+   */
+  async updateVisibility(documentId: string, visibility: string): Promise<{ status: string; id: string; visibility: string }> {
+    return apiFetch<{ status: string; id: string; visibility: string }>(`/documents/${documentId}/visibility`, {
+      method: "PATCH",
+      body: JSON.stringify({ visibility }),
     });
   },
 

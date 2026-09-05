@@ -86,9 +86,26 @@ class RoleChecker:
                 username=username,
                 role=user_role,
                 metadata={
+                    "resource_type": "api_endpoint",
+                    "action": "access",
+                    "result": "denied",
                     "reason": "ROLE_FORBIDDEN",
                     "allowed_roles": self.allowed_roles,
                     "attempted_role": user_role
+                }
+            )
+            AuditLogger.log_event(
+                action="AUTHORIZATION_FAILURE",
+                component="security.dependencies",
+                status="failure",
+                user_id=user_id,
+                username=username,
+                role=user_role,
+                metadata={
+                    "resource_type": "api_endpoint",
+                    "action": "access",
+                    "result": "denied",
+                    "reason": "ROLE_FORBIDDEN"
                 }
             )
             raise HTTPException(

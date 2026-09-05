@@ -5,9 +5,21 @@ export interface User {
   id: number;
   username: string;
   role: "admin" | "user";
+  department_id?: number;
+  department_name?: string;
   is_active: boolean;
   must_change_password?: boolean;
   created_at: string;
+}
+
+export interface Department {
+  id: number;
+  name: string;
+  code: string;
+  description?: string;
+  is_active: boolean;
+  user_count?: number;
+  created_at?: string;
 }
 
 export interface TokenResponse {
@@ -19,6 +31,7 @@ export interface TokenResponse {
 export interface UserRegisterPayload {
   username: string;
   password: string;
+  department_id?: number;
 }
 
 export interface UserLoginPayload {
@@ -27,12 +40,12 @@ export interface UserLoginPayload {
 }
 
 /**
- * Discovered Backend API: Authentication Services
+ * Discovered Backend API: Authentication Services & Department Management
  */
 export const authApi = {
   /**
    * POST /auth/register
-   * Registers a new user. Default role is 'user', admins require 'admin' in username.
+   * Registers a new user with department assignment.
    */
   async register(payload: UserRegisterPayload): Promise<User> {
     return apiFetch<User>("/auth/register", {
@@ -60,6 +73,49 @@ export const authApi = {
    */
   async getProfile(): Promise<User> {
     return apiFetch<User>("/auth/me");
+  },
+
+  /**
+   * GET /departments
+   * Retrieves list of all organizational departments.
+   */
+  async listDepartments(): Promise<Department[]> {
+    return apiFetch<Department[]>("/departments", {
+      method: "GET",
+    });
+  },
+
+  /**
+   * POST /departments
+   * Creates a new organizational department (Admin only).
+   */
+  async createDepartment(payload: { name: string; code: string; description?: string }): Promise<Department> {
+    return apiFetch<Department>("/departments", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /**
+   * PATCH /departments/:id
+   * Updates department details or active status (Admin only).
+   */
+  async updateDepartment(id: number, payload: { name?: string; description?: string; is_active?: boolean }): Promise<Department> {
+    return apiFetch<Department>(`/departments/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /**
+   * PATCH /users/:username/department
+   * Assigns or updates a user's department (Admin only).
+   */
+  async updateUserDepartment(username: string, departmentId: number): Promise<User> {
+    return apiFetch<User>(`/users/${encodeURIComponent(username)}/department`, {
+      method: "PATCH",
+      body: JSON.stringify({ department_id: departmentId }),
+    });
   },
 
   /**

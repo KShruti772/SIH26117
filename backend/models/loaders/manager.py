@@ -47,6 +47,8 @@ class ModelLoaderManager:
         
     async def get_current_model_id(self) -> Optional[str]:
         """Cross-references loaded VRAM model names against the configuration registry."""
+        if self.current_model_id:
+            return self.current_model_id
         try:
             running = await self.get_running_models()
             if running:
