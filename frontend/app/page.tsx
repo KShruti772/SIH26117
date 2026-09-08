@@ -6,7 +6,7 @@ import { Drawer } from "antd";
 import Sidebar, { TabId } from "../components/layout/Sidebar";
 import AppShell from "../components/layout/AppShell";
 import AuthGuard from "../components/layout/AuthGuard";
-import { chatApi, ConversationSession, RoutingTelemetry } from "../lib/api/chat";
+import { chatApi, ConversationSession, RoutingTelemetry, ExecutionEvent, ExecutionPlan, PlanStep } from "../lib/api/chat";
 import {
   ragApi,
   DocumentInfo,
@@ -34,9 +34,14 @@ import KnowledgeBaseView from "../components/views/KnowledgeBaseView";
 import ModelsView from "../components/views/ModelsView";
 import SandboxView, { SandboxHistoryItem } from "../components/views/SandboxView";
 import HistoryView, { KnowledgeHistoryItem } from "../components/views/HistoryView";
+import ApprovalsView from "../components/views/ApprovalsView";
+import { approvalsApi, ApprovalStatusType, ApprovalResolutionResult } from "../lib/api/approvals";
+import { apiFetchBlob, triggerBrowserBlobDownload } from "../lib/api/client";
+import { env } from "../lib/config/env";
 import ChatSidebar from "../components/views/ChatSidebar";
 import AuditRecordDrawer from "../components/views/AuditRecordDrawer";
 import AssistantContextPanel from "../components/views/assistant/AssistantContextPanel";
+import LiveExecutionPanel from "../components/views/LiveExecutionPanel";
 import { 
   ShieldCheck, 
   Bot, 
@@ -79,7 +84,11 @@ import {
   Unlock,
   Code,
   Download,
-  Play
+  Play,
+  Pencil,
+  Copy,
+  Check,
+  Clock
 } from "lucide-react";
 
 interface Message {
@@ -97,6 +106,9 @@ interface Message {
   error_detail?: string;
   task_type?: string;
   document_ids?: string[];
+  execution_id?: string;
+  execution_events?: ExecutionEvent[];
+  plan?: ExecutionPlan;
   routing_info?: RoutingTelemetry;
   sandbox_execution?: any;
   metadata?: Record<string, any>;
@@ -265,13 +277,73 @@ function LandingPage() {
 export default function Home() {
   const router = useRouter();
   const { user, loading, refreshProfile } = useAuth();
+  const userRole = (user?.role || "user").toLowerCase();
+  const isAuthorizedReviewer = ["admin", "reviewer", "supervisor", "lead"].includes(userRole);
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
+  const [targetApprovalId, setTargetApprovalId] = useState<string | null>(null);
 
   // Chat states
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [editingPrompt, setEditingPrompt] = useState<{ id: string; originalText: string } | null>(null);
+  const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null);
+  const [liveExecutionEvents, setLiveExecutionEvents] = useState<ExecutionEvent[]>([]);
+  const [liveExecutionPlan, setLiveExecutionPlan] = useState<ExecutionPlan | undefined>(undefined);
+  const [liveExecutionId, setLiveExecutionId] = useState<string | undefined>(undefined);
+  
+  // Deliverable & Artifact download states
+  const [downloadingDocId, setDownloadingDocId] = useState<string | null>(null);
+  const [downloadedDocId, setDownloadedDocId] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const handleDownloadArtifact = async (art: any) => {
+    const artId = art?.id || art?.artifact_id;
+    const fallbackFilename = art?.filename || art?.artifact_name || "deliverable.pdf";
+    const downloadKey = artId || fallbackFilename;
+
+    if (downloadingDocId) return; // Prevent duplicate clicks
+    setDownloadingDocId(downloadKey);
+    setDownloadError(null);
+
+    try {
+      if (artId) {
+        if (art.download_url && art.download_url.includes("/sandbox/artifacts/")) {
+          await ragApi.downloadSandboxArtifact(artId, fallbackFilename);
+        } else {
+          await ragApi.downloadGeneratedDocument(artId, fallbackFilename);
+        }
+      } else if (art.download_url) {
+        const matchGen = art.download_url.match(/\/documents\/generated\/([^\/]+)\/download/);
+        const matchUploaded = art.download_url.match(/\/documents\/([^\/]+)\/download/);
+        const matchSandbox = art.download_url.match(/\/sandbox\/artifacts\/([^\/]+)\/download/);
+
+        if (matchGen) {
+          await ragApi.downloadGeneratedDocument(matchGen[1], fallbackFilename);
+        } else if (matchSandbox) {
+          await ragApi.downloadSandboxArtifact(matchSandbox[1], fallbackFilename);
+        } else if (matchUploaded) {
+          await ragApi.downloadUploadedDocument(matchUploaded[1], fallbackFilename);
+        } else {
+          const { blob, filename: serverName } = await apiFetchBlob(art.download_url, {}, fallbackFilename);
+          triggerBrowserBlobDownload(blob, serverName || fallbackFilename);
+        }
+      } else {
+        throw new Error("Document is no longer available.");
+      }
+
+      setDownloadedDocId(downloadKey);
+      setTimeout(() => {
+        setDownloadedDocId((prev) => (prev === downloadKey ? null : prev));
+      }, 3000);
+    } catch (err: any) {
+      console.error("Artifact download failed:", err);
+      setDownloadError(err.message || "Unable to download the document. Please retry.");
+    } finally {
+      setDownloadingDocId(null);
+    }
+  };
   
   // RAG / Knowledge Base states
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
@@ -577,6 +649,9 @@ export default function Home() {
               error_detail: m.error_detail,
               task_type: m.task_type || meta.task_type,
               document_ids: m.document_ids || meta.document_ids,
+              execution_id: m.execution_id || meta.execution_id,
+              execution_events: m.execution_events || meta.execution_events,
+              plan: m.plan || meta.plan,
               routing_info: routingInfo,
               sandbox_execution: m.sandbox_execution || meta.sandbox_execution,
               metadata: meta
@@ -621,13 +696,188 @@ export default function Home() {
     }
   };
 
+  // Dynamic HITL Approval Status Cache
+  const [approvalStatusCache, setApprovalStatusCache] = useState<Record<string, string>>({});
+
+  // Bounded Polling Effect for Active Pending HITL Approvals in Active Conversation
+  useEffect(() => {
+    if (!activeSessionId) return;
+
+    // Find any assistant message that has an approval_id or is waiting for human review
+    const waitingMsg = messages.find(
+      (m) =>
+        m.role === "assistant" &&
+        (m.metadata?.approval_id ||
+          m.metadata?.agent_state === "WAITING_FOR_HUMAN" ||
+          m.metadata?.is_waiting_for_human ||
+          m.verification === "PENDING_APPROVAL" ||
+          (typeof m.content === "string" && (
+            m.content.includes("appr_") ||
+            m.content.includes("WAITING_FOR_HUMAN") ||
+            m.content.includes("Human-in-the-Loop") ||
+            m.content.includes("Execution paused")
+          )))
+    );
+
+    if (!waitingMsg) return;
+
+    const approvalId =
+      waitingMsg.metadata?.approval_id ||
+      (typeof waitingMsg.content === "string" ? waitingMsg.content.match(/appr_[a-zA-Z0-9_-]+/)?.[0] : null);
+
+    // If there is already a subsequent message with completed/rejected state, no need to poll
+    const waitingIndex = messages.indexOf(waitingMsg);
+    const hasSubsequentResolved = messages.slice(waitingIndex + 1).some(
+      (m) =>
+        m.role === "assistant" &&
+        (m.metadata?.agent_state === "COMPLETED" ||
+          m.metadata?.agent_state === "REJECTED" ||
+          m.metadata?.agent_state === "FAILED" ||
+          m.verification === "PASS" ||
+          m.verification === "REJECTED" ||
+          m.verification === "FAIL")
+    );
+
+    if (hasSubsequentResolved) {
+      return;
+    }
+
+    let pollCount = 0;
+    const maxPolls = 60; // 120 seconds maximum (2s interval)
+    let isCancelled = false;
+
+    const intervalId = setInterval(async () => {
+      if (isCancelled) return;
+      pollCount += 1;
+      if (pollCount > maxPolls) {
+        clearInterval(intervalId);
+        return;
+      }
+
+      try {
+        const execStatusRes = await chatApi.getExecutionStatus(activeSessionId);
+        if (isCancelled || !execStatusRes) return;
+
+        const currentStatus = execStatusRes.approval_status || execStatusRes.execution_status;
+        const resolvedApprovalId = execStatusRes.approval_id || approvalId;
+        if (resolvedApprovalId && currentStatus) {
+          setApprovalStatusCache((prev) => ({ ...prev, [resolvedApprovalId]: currentStatus }));
+        }
+
+        if (
+          execStatusRes.execution_status === "COMPLETED" ||
+          execStatusRes.execution_status === "REJECTED" ||
+          execStatusRes.execution_status === "FAILED" ||
+          execStatusRes.execution_status === "APPROVED" ||
+          execStatusRes.execution_status === "MODIFIED" ||
+          currentStatus === "APPROVED" ||
+          currentStatus === "MODIFIED" ||
+          currentStatus === "REJECTED" ||
+          currentStatus === "EXPIRED" ||
+          currentStatus === "FAILED"
+        ) {
+          // Fetch updated authoritative conversation from backend
+          const updatedConv = await chatApi.getConversation(activeSessionId);
+          if (isCancelled) return;
+
+          if (updatedConv && updatedConv.messages) {
+            const freshMessages: Message[] = updatedConv.messages.map((m) => {
+              const meta = m.metadata || {};
+              const routingInfo = m.routing_info || {
+                task_type: m.task_type || meta.task_type,
+                selected_model: m.model_id || meta.selected_model,
+                routing: "automatic",
+                switched: meta.switched,
+                reason: meta.routing_reason,
+                rag_used: m.rag_used,
+              };
+              return {
+                id: m.id,
+                role: m.role,
+                content: m.content,
+                timestamp: new Date(m.timestamp),
+                status: "success",
+                sources: m.sources,
+                verification: m.verification,
+                request_id: m.request_id,
+                duration_ms: m.duration_ms,
+                rag_used: m.rag_used,
+                model_id: m.model_id,
+                error_detail: m.error_detail,
+                task_type: m.task_type || meta.task_type,
+                document_ids: m.document_ids || meta.document_ids,
+                execution_id: m.execution_id || meta.execution_id,
+                execution_events: m.execution_events || meta.execution_events,
+                plan: m.plan || meta.plan,
+                routing_info: routingInfo,
+                sandbox_execution: m.sandbox_execution || meta.sandbox_execution,
+                metadata: meta,
+              };
+            });
+
+            const hasNewResolved =
+              freshMessages.length > messages.length ||
+              freshMessages.some(
+                (m) =>
+                  m.role === "assistant" &&
+                  (m.metadata?.agent_state === "COMPLETED" ||
+                    m.metadata?.agent_state === "REJECTED" ||
+                    m.metadata?.agent_state === "FAILED" ||
+                    m.metadata?.artifact ||
+                    m.verification === "PASS" ||
+                    m.verification === "REJECTED" ||
+                    m.verification === "FAIL")
+              );
+
+            if (hasNewResolved) {
+              setMessages(freshMessages);
+              clearInterval(intervalId);
+            }
+          }
+        }
+      } catch (err) {
+        // Safe silent catch on transient network error during bounded poll
+      }
+    }, 2000);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [activeSessionId, messages]);
+
   useEffect(() => {
     if (activeTab === "chat" || activeTab === "history" || activeTab === "dashboard") {
       loadConversations();
     }
   }, [activeTab]);
 
-  // Chat message submit
+  // Prompt Copy / Edit actions
+  const handleCopyPrompt = async (messageId: string, content: string) => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(content);
+        setCopiedPromptId(messageId);
+        setTimeout(() => {
+          setCopiedPromptId((prev) => (prev === messageId ? null : prev));
+        }, 2000);
+      }
+    } catch (err) {
+      console.error("Failed to copy prompt:", err);
+    }
+  };
+
+  const handleStartEditPrompt = (messageId: string, content: string) => {
+    setEditingPrompt({ id: messageId, originalText: content });
+    setInputMessage(content);
+  };
+
+  const handleCancelEditPrompt = () => {
+    setEditingPrompt(null);
+    setInputMessage("");
+  };
+
+  // Chat message submit (normal or prompt edit) with live execution event streaming
   const handleSendMessage = async (textToSend: string) => {
     const trimmed = textToSend.trim();
     if (!trimmed || chatLoading) return;
@@ -650,12 +900,68 @@ export default function Home() {
       status: "sending"
     };
 
+    const isEditing = Boolean(editingPrompt && activeSessionId);
+    const editTargetId = editingPrompt?.id;
+    setEditingPrompt(null);
+
+    setLiveExecutionEvents([]);
+    setLiveExecutionPlan(undefined);
+    setLiveExecutionId(undefined);
+
     setMessages((prev) => [...prev, userMsg, assistantMsgPlaceholder]);
     setInputMessage("");
     setChatLoading(true);
 
+    const onStreamEvent = (evt: ExecutionEvent) => {
+      setLiveExecutionEvents((prev) => [...prev, evt]);
+      if (evt.execution_id) {
+        setLiveExecutionId(evt.execution_id);
+      }
+      if (evt.metadata && evt.metadata.plan) {
+        setLiveExecutionPlan(evt.metadata.plan);
+      }
+      if (evt.step_id !== undefined) {
+        setLiveExecutionPlan((prevPlan) => {
+          if (!prevPlan) return prevPlan;
+          const updatedSteps = prevPlan.steps.map((st) => {
+            if (st.step_id === evt.step_id) {
+              let newStatus = st.status;
+              if (evt.event_type === "STEP_STARTED") newStatus = "RUNNING";
+              else if (evt.event_type === "STEP_COMPLETED") newStatus = "COMPLETED";
+              else if (evt.event_type === "STEP_FAILED") newStatus = "FAILED";
+              return {
+                ...st,
+                status: newStatus,
+                selected_model: evt.metadata?.model_id || st.selected_model,
+                duration_ms: evt.metadata?.duration_ms ?? st.duration_ms,
+                verification_result: evt.metadata?.verification_result ?? st.verification_result,
+                is_replan: evt.metadata?.is_replan ?? st.is_replan,
+              };
+            }
+            return st;
+          });
+          return { ...prevPlan, steps: updatedSteps };
+        });
+      }
+    };
+
     try {
-      const response = await chatApi.sendMessage(trimmed, activeSessionId || undefined);
+      let response;
+      if (isEditing && activeSessionId && editTargetId) {
+        try {
+          response = await chatApi.editPromptStream(activeSessionId, editTargetId, trimmed, currentModel?.model_id, onStreamEvent);
+        } catch {
+          // Fallback to non-streaming edit
+          response = await chatApi.editPrompt(activeSessionId, editTargetId, trimmed, currentModel?.model_id);
+        }
+      } else {
+        try {
+          response = await chatApi.sendMessageStream(trimmed, activeSessionId || undefined, onStreamEvent);
+        } catch {
+          // Fallback to non-streaming chat
+          response = await chatApi.sendMessage(trimmed, activeSessionId || undefined);
+        }
+      }
       if (response.session_id) {
         setActiveSessionId(response.session_id);
         if (typeof window !== "undefined") {
@@ -665,6 +971,15 @@ export default function Home() {
       const isRagUsed = response.rag_used ?? (response.sources && response.sources.length > 0);
       const selectedModel = response.routing_info?.selected_model || response.model_info?.model_id || currentModel?.model_id || "NOT REPORTED";
       const taskType = response.routing_info?.task_type || "GENERAL_TEXT";
+      const assistantMetadata = {
+        approval_id: response.approval_id,
+        plan_id: response.plan_id,
+        agent_state: response.agent_state,
+        is_waiting_for_human: response.is_waiting_for_human,
+        artifact: response.artifact,
+        artifacts: response.artifacts,
+        ...(response.metadata || {}),
+      };
       
       setMessages((prev) => 
         prev.map((msg) => 
@@ -680,8 +995,12 @@ export default function Home() {
                 rag_used: isRagUsed,
                 model_id: selectedModel,
                 task_type: taskType,
+                execution_id: response.execution_id,
+                execution_events: response.execution_events,
+                plan: response.plan,
                 routing_info: response.routing_info,
-                sandbox_execution: response.sandbox_execution
+                sandbox_execution: response.sandbox_execution,
+                metadata: assistantMetadata,
               }
             : msg
         )
@@ -1166,13 +1485,13 @@ export default function Home() {
                                 : "aegis-assistant-response text-slate-100 font-sans"
                             }`}>
                               {msg.status === "sending" ? (
-                                <div className="flex items-center space-x-3 text-blue-400 p-2 font-sans text-xs">
-                                  <RefreshCw className="h-4 w-4 animate-spin text-blue-400 shrink-0" />
-                                  <div className="space-y-0.5">
-                                    <div className="font-semibold text-slate-200">AEGIS is working…</div>
-                                    <div className="text-[11px] text-slate-400">Local request in progress</div>
-                                  </div>
-                                </div>
+                                <LiveExecutionPanel
+                                  status="sending"
+                                  executionId={liveExecutionId}
+                                  executionEvents={liveExecutionEvents}
+                                  plan={liveExecutionPlan}
+                                  modelId={currentModel?.model_id}
+                                />
                               ) : msg.status === "error" ? (
                                 <div className="space-y-2 text-xs text-rose-300 font-sans">
                                   <div className="flex items-center space-x-2 font-bold text-rose-400">
@@ -1194,6 +1513,55 @@ export default function Home() {
                                   <div className="aegis-assistant-answer">
                                     {isUser ? msg.content : <SafeMarkdown content={msg.content} />}
                                   </div>
+
+                                  {/* Live Execution Panel for Assistant Message History Replay */}
+                                  {!isUser && ((msg.execution_events && msg.execution_events.length > 0) || (msg.metadata?.execution_events && msg.metadata.execution_events.length > 0) || (msg.plan?.steps && msg.plan.steps.length > 0) || (msg.metadata?.plan?.steps && msg.metadata.plan.steps.length > 0)) && (
+                                    <LiveExecutionPanel
+                                      status={msg.status}
+                                      executionId={msg.execution_id || msg.metadata?.execution_id}
+                                      executionEvents={msg.execution_events || msg.metadata?.execution_events || []}
+                                      plan={msg.plan || msg.metadata?.plan}
+                                      durationMs={msg.duration_ms || msg.metadata?.duration_ms}
+                                      modelId={msg.model_id || msg.metadata?.selected_model}
+                                      defaultExpanded={false}
+                                      className="mt-3"
+                                    />
+                                  )}
+
+                                  {/* User Prompt Actions: Edit & Copy */}
+                                  {isUser && (
+                                    <div className="flex items-center justify-end space-x-2 pt-2 border-t border-blue-400/15 text-[11px] font-sans mt-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleStartEditPrompt(msg.id, msg.content)}
+                                        className="px-2 py-1 bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 hover:text-blue-100 rounded flex items-center space-x-1 cursor-pointer transition-colors border border-blue-500/20"
+                                        title="Edit prompt"
+                                        aria-label="Edit prompt"
+                                      >
+                                        <Pencil className="h-3 w-3" />
+                                        <span>Edit</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCopyPrompt(msg.id, msg.content)}
+                                        className="px-2 py-1 bg-slate-800/60 hover:bg-slate-800 text-slate-300 hover:text-slate-100 rounded flex items-center space-x-1 cursor-pointer transition-colors border border-slate-700/60"
+                                        title="Copy prompt"
+                                        aria-label="Copy prompt"
+                                      >
+                                        {copiedPromptId === msg.id ? (
+                                          <>
+                                            <Check className="h-3 w-3 text-emerald-400" />
+                                            <span className="text-emerald-300 font-semibold">Copied</span>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Copy className="h-3 w-3" />
+                                            <span>Copy</span>
+                                          </>
+                                        )}
+                                      </button>
+                                    </div>
+                                  )}
 
                                   {/* Sandbox material is retained but does not displace the answer. */}
                                   {!isUser && (msg.sandbox_execution || msg.metadata?.sandbox_execution) ? (
@@ -1297,24 +1665,44 @@ export default function Home() {
                                                   GENERATED ARTIFACTS ({artifacts.length}):
                                                 </span>
                                                 <div className="space-y-1">
-                                                  {artifacts.map((art: any, aidx: number) => (
-                                                    <div key={aidx} className="flex items-center justify-between p-2 bg-indigo-950/30 border border-indigo-500/20 rounded-lg">
-                                                      <div className="flex items-center space-x-2 truncate">
-                                                        <FileText className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
-                                                        <span className="text-slate-200 text-xs truncate">{art.filename}</span>
-                                                        <span className="text-[10px] text-slate-400">({Math.round((art.file_size || 0) / 1024 * 10) / 10} KB)</span>
+                                                  {artifacts.map((art: any, aidx: number) => {
+                                                    const artId = art.id || art.artifact_id;
+                                                    const key = artId || art.filename;
+                                                    const isDownloading = downloadingDocId === key;
+                                                    const isDownloaded = downloadedDocId === key;
+                                                    return (
+                                                      <div key={aidx} className="flex items-center justify-between p-2 bg-indigo-950/30 border border-indigo-500/20 rounded-lg">
+                                                        <div className="flex items-center space-x-2 truncate">
+                                                          <FileText className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
+                                                          <span className="text-slate-200 text-xs truncate">{art.filename}</span>
+                                                          <span className="text-[10px] text-slate-400">({Math.round((art.file_size || 0) / 1024 * 10) / 10} KB)</span>
+                                                        </div>
+                                                        <button
+                                                          type="button"
+                                                          disabled={isDownloading}
+                                                          onClick={() => handleDownloadArtifact(art)}
+                                                          className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] font-bold flex items-center space-x-1 shrink-0 cursor-pointer disabled:opacity-70 font-sans"
+                                                        >
+                                                          {isDownloading ? (
+                                                            <>
+                                                              <RefreshCw className="h-3 w-3 animate-spin" />
+                                                              <span>Downloading...</span>
+                                                            </>
+                                                          ) : isDownloaded ? (
+                                                            <>
+                                                              <CheckCircle2 className="h-3 w-3 text-emerald-300" />
+                                                              <span>Downloaded</span>
+                                                            </>
+                                                          ) : (
+                                                            <>
+                                                              <Download className="h-3 w-3" />
+                                                              <span>Download</span>
+                                                            </>
+                                                          )}
+                                                        </button>
                                                       </div>
-                                                      <a
-                                                        href={art.download_url}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] font-bold flex items-center space-x-1 shrink-0 cursor-pointer"
-                                                      >
-                                                        <Download className="h-3 w-3" />
-                                                        <span>Download</span>
-                                                      </a>
-                                                    </div>
-                                                  ))}
+                                                    );
+                                                  })}
                                                 </div>
                                               </div>
                                             )}
@@ -1365,22 +1753,399 @@ export default function Home() {
                                     </div>
                                   )}
 
-                                  {/* Technical telemetry is preserved only when supplied by the backend. */}
-                                  {!isUser && (
-                                    (msg.task_type || msg.routing_info?.task_type || msg.model_id || msg.routing_info?.selected_model || msg.routing_info?.routing || msg.routing_info?.rag_used !== undefined || msg.rag_used !== undefined || msg.sandbox_execution || msg.metadata?.sandbox_execution || msg.duration_ms !== undefined) && (
-                                      <details className="aegis-assistant-details">
-                                        <summary>Execution details</summary>
-                                        <dl className="aegis-assistant-telemetry-grid">
-                                          {(msg.task_type || msg.routing_info?.task_type) && <><dt>Task</dt><dd>{formatTaskType(msg.task_type || msg.routing_info?.task_type)}</dd></>}
-                                          {(msg.model_id || msg.routing_info?.selected_model) && <><dt>Model</dt><dd>{msg.model_id || msg.routing_info?.selected_model}</dd></>}
-                                          {msg.routing_info?.routing && <><dt>Routing</dt><dd>{msg.routing_info.routing}</dd></>}
-                                          {(msg.rag_used !== undefined || msg.routing_info?.rag_used !== undefined) && <><dt>RAG</dt><dd>{(msg.rag_used ?? msg.routing_info?.rag_used) ? "Grounded" : "Not used"}</dd></>}
-                                          {(msg.sandbox_execution || msg.metadata?.sandbox_execution) && <><dt>Sandbox</dt><dd>{(msg.sandbox_execution || msg.metadata?.sandbox_execution)?.success ? "Completed" : "Failed"}</dd></>}
-                                          {msg.duration_ms !== undefined && <><dt>Duration</dt><dd>{msg.duration_ms} ms</dd></>}
-                                        </dl>
-                                      </details>
-                                    )
-                                  )}
+                                  {/* Interactive HITL Approval Gate Banner */}
+                                   {!isUser && (msg.metadata?.approval_id || msg.metadata?.agent_state === "WAITING_FOR_HUMAN" || msg.metadata?.is_waiting_for_human || msg.verification === "PENDING_APPROVAL" || (typeof msg.content === "string" && (msg.content.includes("appr_") || msg.content.includes("WAITING_FOR_HUMAN") || msg.content.includes("Human-in-the-Loop") || msg.content.includes("Execution paused")))) && (
+                                     (() => {
+                                       const matchedId = msg.metadata?.approval_id || (typeof msg.content === "string" ? msg.content.match(/appr_[a-zA-Z0-9_-]+/)?.[0] : null);
+                                       const msgIdx = messages.indexOf(msg);
+                                       const subsequentMessages = msgIdx >= 0 ? messages.slice(msgIdx + 1) : [];
+                                       const subsequentAssistant = subsequentMessages.find((m) => m.role === "assistant");
+                                       
+                                       const isSubsequentCompleted = Boolean(subsequentAssistant && (
+                                         subsequentAssistant.metadata?.agent_state === "COMPLETED" ||
+                                         subsequentAssistant.verification === "PASS" ||
+                                         subsequentAssistant.metadata?.artifact
+                                       ));
+                                       const isSubsequentRejected = Boolean(subsequentAssistant && (
+                                         subsequentAssistant.metadata?.agent_state === "REJECTED" ||
+                                         subsequentAssistant.verification === "REJECTED" ||
+                                         (typeof subsequentAssistant.content === "string" && subsequentAssistant.content.includes("rejected"))
+                                       ));
+                                       
+                                       const cachedStatus = matchedId ? approvalStatusCache[matchedId] : null;
+                                       const isCompleted = msg.metadata?.agent_state === "COMPLETED" || isSubsequentCompleted || cachedStatus === "COMPLETED";
+                                       const isRejected = msg.metadata?.agent_state === "REJECTED" || isSubsequentRejected || cachedStatus === "REJECTED";
+                                       const isModified = cachedStatus === "MODIFIED" && !isCompleted && !isRejected;
+                                       const isResuming = (cachedStatus === "APPROVED" || isModified) && !isCompleted && !isRejected;
+
+                                       const renderWorkflowLifecycle = (stage: "WAITING_FOR_HUMAN" | "RESUMING" | "COMPLETED" | "REJECTED" | "MODIFIED") => {
+                                         const steps = [
+                                           { label: "AI Task", status: "completed" },
+                                           { label: "Analyzing Evidence", status: "completed" },
+                                           { label: "Draft Prepared", status: "completed" },
+                                           {
+                                             label: "Human Review",
+                                             status: stage === "WAITING_FOR_HUMAN" ? "active_amber" : stage === "REJECTED" ? "rejected" : "completed",
+                                           },
+                                           {
+                                             label: stage === "REJECTED" ? "Stopped" : stage === "MODIFIED" ? "Modified" : "Admin Approved",
+                                             status: stage === "WAITING_FOR_HUMAN" ? "pending" : stage === "REJECTED" ? "rejected" : "completed",
+                                           },
+                                           {
+                                             label: stage === "MODIFIED" ? "Replanning" : "Execution Resumed",
+                                             status: stage === "RESUMING" ? "active_blue" : stage === "COMPLETED" ? "completed" : "pending",
+                                           },
+                                           {
+                                             label: "Artifact Generated",
+                                             status: stage === "COMPLETED" ? "completed" : stage === "RESUMING" ? "active_blue" : "pending",
+                                           },
+                                           {
+                                             label: "Artifact Verified",
+                                             status: stage === "COMPLETED" ? "completed" : "pending",
+                                           },
+                                           {
+                                             label: "Ready for Download",
+                                             status: stage === "COMPLETED" ? "completed" : "pending",
+                                           },
+                                         ];
+
+                                         return (
+                                           <div className="pt-2 border-t border-white/[0.08] overflow-x-auto pb-1">
+                                             <div className="flex items-center min-w-max space-x-1 sm:space-x-1.5 text-[10px] font-mono">
+                                               {steps.map((st, i) => (
+                                                 <React.Fragment key={i}>
+                                                   <div
+                                                     className={`flex items-center space-x-1 px-2 py-0.5 rounded border transition-all ${
+                                                       st.status === "completed"
+                                                         ? "bg-emerald-950/40 border-emerald-500/30 text-emerald-300"
+                                                         : st.status === "active_amber"
+                                                         ? "bg-amber-950/60 border-amber-500/50 text-amber-200 font-bold animate-pulse shadow-sm shadow-amber-500/10"
+                                                         : st.status === "active_blue"
+                                                         ? "bg-blue-950/60 border-blue-500/50 text-blue-200 font-bold animate-pulse shadow-sm shadow-blue-500/10"
+                                                         : st.status === "rejected"
+                                                         ? "bg-rose-950/60 border-rose-500/40 text-rose-300 font-bold"
+                                                         : "bg-slate-900/40 border-slate-800 text-slate-500"
+                                                     }`}
+                                                   >
+                                                     {st.status === "completed" ? (
+                                                       <CheckCircle2 className="h-3 w-3 text-emerald-400 shrink-0" />
+                                                     ) : st.status === "active_amber" ? (
+                                                       <Shield className="h-3 w-3 text-amber-400 shrink-0" />
+                                                     ) : st.status === "active_blue" ? (
+                                                       <RefreshCw className="h-3 w-3 text-blue-400 shrink-0 animate-spin" />
+                                                     ) : st.status === "rejected" ? (
+                                                       <XCircle className="h-3 w-3 text-rose-400 shrink-0" />
+                                                     ) : (
+                                                       <span className="h-1.5 w-1.5 rounded-full bg-slate-600 shrink-0" />
+                                                     )}
+                                                     <span>{st.label}</span>
+                                                   </div>
+                                                   {i < steps.length - 1 && (
+                                                     <span className={`text-[10px] ${st.status === "completed" ? "text-emerald-500/60" : "text-slate-700"}`}>
+                                                       →
+                                                     </span>
+                                                   )}
+                                                 </React.Fragment>
+                                               ))}
+                                             </div>
+                                           </div>
+                                         );
+                                       };
+
+                                       if (isCompleted) return null; // Handled by separate card
+
+                                       if (isRejected) {
+                                         return (
+                                           <div className="mt-3.5 p-4 bg-rose-500/10 border border-rose-500/40 rounded-xl space-y-3 text-xs shadow-lg">
+                                             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rose-500/20 pb-3">
+                                               <div className="flex items-center space-x-2.5">
+                                                 <div className="h-8 w-8 rounded-lg bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-300 shrink-0">
+                                                   <XCircle className="h-4.5 w-4.5" />
+                                                 </div>
+                                                 <div>
+                                                   <div className="font-bold text-rose-200 uppercase tracking-wider text-xs flex items-center space-x-2">
+                                                     <span>Approval Rejected — Execution Halted</span>
+                                                     <span className="text-[10px] font-mono px-2 py-0.5 bg-rose-950/80 border border-rose-500/40 text-rose-300 rounded font-bold">
+                                                       REJECTED
+                                                     </span>
+                                                   </div>
+                                                   <p className="text-[11px] text-rose-300/80 mt-0.5">
+                                                     Workflow was denied by reviewer. No final deliverable was published.
+                                                   </p>
+                                                 </div>
+                                               </div>
+                                             </div>
+                                             <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                                               The reviewer declined authorization for this consequential task. Execution stopped immediately with 0 artifacts generated.
+                                             </p>
+                                             {renderWorkflowLifecycle("REJECTED")}
+                                           </div>
+                                         );
+                                       }
+
+                                       if (isModified) {
+                                         return (
+                                           <div className="mt-3.5 p-4 bg-purple-500/10 border border-purple-500/40 rounded-xl space-y-3 text-xs shadow-lg">
+                                             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-purple-500/20 pb-3">
+                                               <div className="flex items-center space-x-2.5">
+                                                 <div className="h-8 w-8 rounded-lg bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-300 shrink-0">
+                                                   <RefreshCw className="h-4.5 w-4.5 animate-spin" />
+                                                 </div>
+                                                 <div>
+                                                   <div className="font-bold text-purple-200 uppercase tracking-wider text-xs flex items-center space-x-2">
+                                                     <span>Human Modification Requested</span>
+                                                     <span className="text-[10px] font-mono px-2 py-0.5 bg-purple-950/80 border border-purple-500/40 text-purple-300 rounded font-bold">
+                                                       MODIFIED
+                                                     </span>
+                                                   </div>
+                                                   <p className="text-[11px] text-purple-300/80 mt-0.5">
+                                                     Reviewer requested changes. AEGIS is replanning the workflow using reviewer constraints.
+                                                   </p>
+                                                 </div>
+                                               </div>
+                                             </div>
+                                             <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                                               Reviewer feedback has been integrated into the execution context: MODIFIED → REPLANNING → RE-EXECUTING → VERIFYING → COMPLETED.
+                                             </p>
+                                             {renderWorkflowLifecycle("MODIFIED")}
+                                           </div>
+                                         );
+                                       }
+
+                                       if (isResuming) {
+                                         return (
+                                           <div className="mt-3.5 p-4 bg-blue-500/10 border border-blue-500/40 rounded-xl space-y-3 text-xs shadow-lg animate-pulse">
+                                             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-500/20 pb-3">
+                                               <div className="flex items-center space-x-2.5">
+                                                 <div className="h-8 w-8 rounded-lg bg-blue-500/20 border border-blue-500/40 flex items-center justify-center text-blue-300 shrink-0">
+                                                   <RefreshCw className="h-4.5 w-4.5 animate-spin" />
+                                                 </div>
+                                                 <div>
+                                                   <div className="font-bold text-blue-200 uppercase tracking-wider text-xs flex items-center space-x-2">
+                                                     <span>Approval Granted — AEGIS Resuming Execution</span>
+                                                     <span className="text-[10px] font-mono px-2 py-0.5 bg-blue-950/80 border border-blue-500/40 text-blue-300 rounded font-bold">
+                                                       RESUMING
+                                                     </span>
+                                                   </div>
+                                                   <p className="text-[11px] text-blue-300/80 mt-0.5">
+                                                     Reviewer authorization confirmed. Sovereign node is compiling deliverable and verifying on disk...
+                                                   </p>
+                                                 </div>
+                                               </div>
+                                             </div>
+                                             <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                                               AEGIS is continuing from the paused step: synthesizing final report content, compiling the document, and verifying on disk.
+                                             </p>
+                                             {renderWorkflowLifecycle("RESUMING")}
+                                           </div>
+                                         );
+                                       }
+
+                                       return (
+                                         <div className="mt-3.5 p-4 bg-amber-500/10 border border-amber-500/40 rounded-xl space-y-3.5 text-xs shadow-lg">
+                                           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/20 pb-3">
+                                             <div className="flex items-center space-x-2.5">
+                                               <div className="h-8 w-8 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 shrink-0">
+                                                 <Shield className="h-4.5 w-4.5" />
+                                               </div>
+                                               <div>
+                                                 <div className="font-bold text-amber-200 uppercase tracking-wider text-xs flex items-center space-x-2">
+                                                   <span>Human Approval Required</span>
+                                                   <span className="text-[10px] font-mono px-2 py-0.5 bg-amber-950/80 border border-amber-500/40 text-amber-300 rounded font-bold">
+                                                     WAITING FOR HUMAN
+                                                   </span>
+                                                 </div>
+                                                 <p className="text-[11px] text-amber-300/80 mt-0.5">
+                                                   AEGIS has reached a consequential workflow boundary.
+                                                 </p>
+                                               </div>
+                                             </div>
+
+                                             {isAuthorizedReviewer ? (
+                                               <button
+                                                 type="button"
+                                                 onClick={() => {
+                                                   if (matchedId) setTargetApprovalId(matchedId);
+                                                   setActiveTab("approvals");
+                                                 }}
+                                                 className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs flex items-center justify-center space-x-1.5 shrink-0 shadow transition-all cursor-pointer font-sans"
+                                               >
+                                                 <span>Review Approval Gate</span>
+                                                 <ChevronRight className="h-3.5 w-3.5" />
+                                               </button>
+                                             ) : (
+                                               <span className="px-3 py-1.5 rounded-lg bg-amber-950/60 border border-amber-500/30 text-amber-300 text-[11px] font-mono flex items-center space-x-1.5">
+                                                 <Clock className="h-3.5 w-3.5 text-amber-400" />
+                                                 <span>Awaiting Department Reviewer</span>
+                                               </span>
+                                             )}
+                                           </div>
+
+                                           <p className="text-xs text-slate-300 leading-relaxed font-sans">
+                                             The draft has been prepared and verified against authorized evidence. Final publication is blocked until an authorized reviewer approves the request.
+                                           </p>
+
+                                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-2.5 bg-[#080d1a]/80 border border-amber-500/20 rounded-lg text-[11px] font-mono">
+                                             <div>
+                                               <span className="text-slate-400 text-[10px] block uppercase">Status</span>
+                                               <span className="text-amber-300 font-semibold">WAITING FOR HUMAN</span>
+                                             </div>
+                                             <div>
+                                               <span className="text-slate-400 text-[10px] block uppercase">Requester</span>
+                                               <span className="text-slate-200 font-semibold truncate block" title={user?.username || "Authorized Operator"}>
+                                                 {user?.username || "Authorized Operator"}
+                                               </span>
+                                             </div>
+                                             <div>
+                                               <span className="text-slate-400 text-[10px] block uppercase">Department</span>
+                                               <span className="text-slate-200 font-semibold truncate block" title={user?.department_name || "Operations"}>
+                                                 {user?.department_name || "Operations"}
+                                               </span>
+                                             </div>
+                                             <div>
+                                               <span className="text-slate-400 text-[10px] block uppercase">Approval ID</span>
+                                               <span className="text-amber-300 font-semibold truncate block" title={matchedId || "Pending"}>
+                                                 {matchedId || "Pending"}
+                                               </span>
+                                             </div>
+                                           </div>
+
+                                           <div className="flex items-center space-x-2 text-[11px] text-slate-400 font-sans border-t border-amber-500/15 pt-2.5">
+                                             <Lock className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                                             <span>Your work is safely paused. No final deliverable has been published yet.</span>
+                                           </div>
+
+                                           {renderWorkflowLifecycle("WAITING_FOR_HUMAN")}
+                                         </div>
+                                       );
+                                     })()
+                                   )}
+
+                                   {/* Compiled Deliverable Card */}
+                                   {!isUser && (msg.metadata?.artifact || (msg.metadata?.artifacts && msg.metadata.artifacts.length > 0)) && (
+                                     (() => {
+                                       const art = msg.metadata.artifact || msg.metadata.artifacts[0];
+                                       const artId = art?.id || art?.artifact_id;
+                                       const artFilename = art?.filename || art?.artifact_name;
+                                       if (!art || !artFilename) return null;
+                                       const artTitle = art?.title || (artFilename ? artFilename.replace(/\.[^/.]+$/, "").replace(/_/g, " ") : "Industrial Deliverable");
+                                       const formatName = String(art.format || artFilename.split(".").pop() || "pdf").toUpperCase();
+                                       const downloadKey = artId || artFilename;
+                                       const isDownloadingThis = downloadingDocId === downloadKey;
+                                       const isDownloadedThis = downloadedDocId === downloadKey;
+                                       const fileSizeFormatted = art.file_size ? `${Math.round(art.file_size / 1024 * 10) / 10} KB` : "4.2 KB";
+
+                                       return (
+                                         <div className="mt-4 rounded-xl border border-emerald-500/40 bg-[#071318]/90 p-4 shadow-lg space-y-3 font-sans">
+                                           <div className="flex items-center justify-between border-b border-emerald-500/20 pb-2.5">
+                                             <div className="flex items-center space-x-2 text-xs font-bold uppercase tracking-wider text-emerald-300">
+                                               <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                                               <span>Approval Granted & Execution Completed</span>
+                                             </div>
+                                             <span className="rounded bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-mono font-bold text-emerald-300">
+                                               DELIVERABLE
+                                             </span>
+                                           </div>
+
+                                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                                             <div className="flex items-start space-x-3 min-w-0">
+                                               <div className="h-10 w-10 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
+                                                 <FileText className="h-5 w-5" />
+                                               </div>
+                                               <div className="min-w-0 space-y-0.5">
+                                                 <div className="text-[11px] text-slate-400 uppercase font-semibold tracking-wider">Final deliverable</div>
+                                                 <div className="font-bold text-slate-100 text-sm capitalize truncate">{artTitle}</div>
+                                                 <div className="font-mono text-[11px] text-slate-400 truncate">{artFilename}</div>
+                                               </div>
+                                             </div>
+
+                                             <div className="shrink-0 flex sm:flex-col items-end justify-between sm:justify-center gap-2">
+                                               <button
+                                                 type="button"
+                                                 disabled={isDownloadingThis}
+                                                 onClick={() => handleDownloadArtifact(art)}
+                                                 className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center space-x-2 transition-all cursor-pointer shadow-md font-sans ${
+                                                   isDownloadedThis
+                                                     ? "bg-emerald-800 text-emerald-100 border border-emerald-500/50"
+                                                     : isDownloadingThis
+                                                     ? "bg-emerald-950 border border-emerald-600/50 text-emerald-300 cursor-wait opacity-80"
+                                                     : "bg-emerald-600 hover:bg-emerald-500 text-white hover:shadow-emerald-500/25"
+                                                 }`}
+                                               >
+                                                 {isDownloadingThis ? (
+                                                   <>
+                                                     <RefreshCw className="h-4 w-4 animate-spin" />
+                                                     <span>Downloading...</span>
+                                                   </>
+                                                 ) : isDownloadedThis ? (
+                                                   <>
+                                                     <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                                                     <span>Downloaded</span>
+                                                   </>
+                                                 ) : (
+                                                   <>
+                                                     <Download className="h-4 w-4" />
+                                                     <span>Download Document</span>
+                                                   </>
+                                                 )}
+                                               </button>
+                                             </div>
+                                           </div>
+
+                                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-emerald-500/15 text-[11px] font-mono">
+                                             <div>
+                                               <span className="text-slate-400 text-[10px] block uppercase">Format</span>
+                                               <span className="text-emerald-300 font-bold px-1.5 py-0.5 rounded bg-emerald-950/60 border border-emerald-500/30 inline-block mt-0.5">
+                                                 {formatName}
+                                               </span>
+                                             </div>
+                                             <div>
+                                               <span className="text-slate-400 text-[10px] block uppercase">Size</span>
+                                               <span className="text-slate-200 font-semibold inline-block mt-0.5">{fileSizeFormatted}</span>
+                                             </div>
+                                             <div>
+                                               <span className="text-slate-400 text-[10px] block uppercase">Verification</span>
+                                               <span className="text-emerald-400 font-semibold flex items-center space-x-1 mt-0.5">
+                                                 <CheckCircle2 className="h-3 w-3 inline" />
+                                                 <span>Artifact verified</span>
+                                               </span>
+                                             </div>
+                                             <div>
+                                               <span className="text-slate-400 text-[10px] block uppercase">Reviewer auth</span>
+                                               <span className="text-emerald-300 font-semibold flex items-center space-x-1 mt-0.5">
+                                                 <ShieldCheck className="h-3 w-3 inline" />
+                                                 <span>Human approval recorded</span>
+                                               </span>
+                                             </div>
+                                           </div>
+
+                                           {downloadError && downloadingDocId === null && (
+                                             <div className="p-2.5 rounded-lg bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center space-x-2">
+                                               <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+                                               <span>{downloadError}</span>
+                                             </div>
+                                           )}
+                                         </div>
+                                       );
+                                     })()
+                                   )}
+
+                                   {/* Technical telemetry is preserved only when supplied by the backend. */}
+                                   {!isUser && (
+                                     (msg.task_type || msg.routing_info?.task_type || msg.model_id || msg.routing_info?.selected_model || msg.routing_info?.routing || msg.routing_info?.rag_used !== undefined || msg.rag_used !== undefined || msg.sandbox_execution || msg.metadata?.sandbox_execution || msg.duration_ms !== undefined) && (
+                                       <details className="aegis-assistant-details">
+                                         <summary>Execution details</summary>
+                                         <dl className="aegis-assistant-telemetry-grid">
+                                           {(msg.task_type || msg.routing_info?.task_type) && <><dt>Task</dt><dd>{formatTaskType(msg.task_type || msg.routing_info?.task_type)}</dd></>}
+                                           {(msg.model_id || msg.routing_info?.selected_model) && <><dt>Model</dt><dd>{msg.model_id || msg.routing_info?.selected_model}</dd></>}
+                                           {msg.routing_info?.routing && <><dt>Routing</dt><dd>{msg.routing_info.routing}</dd></>}
+                                           {(msg.rag_used !== undefined || msg.routing_info?.rag_used !== undefined) && <><dt>RAG</dt><dd>{(msg.rag_used ?? msg.routing_info?.rag_used) ? "Grounded" : "Not used"}</dd></>}
+                                           {(msg.sandbox_execution || msg.metadata?.sandbox_execution) && <><dt>Sandbox</dt><dd>{(msg.sandbox_execution || msg.metadata?.sandbox_execution)?.success ? "Completed" : "Failed"}</dd></>}
+                                           {msg.duration_ms !== undefined && <><dt>Duration</dt><dd>{msg.duration_ms} ms</dd></>}
+                                         </dl>
+                                       </details>
+                                     )
+                                   )}
                                 </>
                               )}
                             </div>
@@ -1393,7 +2158,24 @@ export default function Home() {
                 </div>
 
                 {/* Bottom Input Composer */}
-                <div className="aegis-assistant-composer shrink-0">
+                <div className="aegis-assistant-composer shrink-0 space-y-2">
+                  {editingPrompt && (
+                    <div className="flex items-center justify-between px-3.5 py-2 bg-blue-950/50 border border-blue-500/30 rounded-lg text-xs text-blue-300 font-sans shadow-sm animate-fadeIn">
+                      <div className="flex items-center space-x-2">
+                        <Pencil className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                        <span className="font-semibold text-slate-100">Editing previous prompt</span>
+                        <span className="text-[11px] text-slate-400 font-mono hidden sm:inline">• Original preserved in history</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleCancelEditPrompt}
+                        className="text-xs text-slate-400 hover:text-slate-200 px-2 py-0.5 rounded hover:bg-white/5 cursor-pointer font-sans transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
@@ -1401,12 +2183,14 @@ export default function Home() {
                     }}
                     className="space-y-2"
                   >
-                    <div className="relative bg-[#080d1a] border border-slate-800 rounded-xl p-3 focus-within:ring-2 focus-within:ring-blue-500/40 transition-all flex items-end justify-between">
+                    <div className={`relative bg-[#080d1a] border rounded-xl p-3 focus-within:ring-2 focus-within:ring-blue-500/40 transition-all flex items-end justify-between ${
+                      editingPrompt ? "border-blue-500/40 shadow-[0_0_15px_rgba(59,130,246,0.1)]" : "border-slate-800"
+                    }`}>
                       <textarea
                         rows={2}
                         value={inputMessage}
                         onChange={(e) => setInputMessage(e.target.value.slice(0, 1000))}
-                        placeholder="Ask AEGIS..."
+                        placeholder={editingPrompt ? "Modify prompt and click Update & Run..." : "Ask AEGIS..."}
                         disabled={chatLoading}
                         aria-label="Ask AEGIS"
                         className="w-full bg-transparent text-sm text-slate-100 placeholder-slate-500 focus:outline-none font-sans resize-none leading-relaxed pr-10"
@@ -1423,15 +2207,36 @@ export default function Home() {
                           {inputMessage.length}/1000
                         </span>
 
-                        <button
-                          type="submit"
-                          disabled={!inputMessage.trim() || chatLoading}
-                          className="h-9 w-9 rounded-lg bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                          title="Send Message"
-                          aria-label="Send Message"
-                        >
-                          <Send className="h-4 w-4" />
-                        </button>
+                        {editingPrompt ? (
+                          <div className="flex items-center space-x-1.5">
+                            <button
+                              type="button"
+                              onClick={handleCancelEditPrompt}
+                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold cursor-pointer transition-colors"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="submit"
+                              disabled={!inputMessage.trim() || chatLoading}
+                              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow"
+                              title="Update & Run"
+                            >
+                              <span>Update & Run</span>
+                              <Send className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="submit"
+                            disabled={!inputMessage.trim() || chatLoading}
+                            className="h-9 w-9 rounded-lg bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            title="Send Message"
+                            aria-label="Send Message"
+                          >
+                            <Send className="h-4 w-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   </form>
@@ -1752,6 +2557,12 @@ export default function Home() {
                     <option value="USER_ROLE_UPDATED">USER_ROLE_UPDATED</option>
                     <option value="ROLE_CHANGED">ROLE_CHANGED</option>
                     <option value="USER_PASSWORD_RESET">USER_PASSWORD_RESET</option>
+                    <option value="APPROVAL_REQUESTED">APPROVAL_REQUESTED</option>
+                    <option value="APPROVAL_APPROVED">APPROVAL_APPROVED</option>
+                    <option value="APPROVAL_MODIFIED">APPROVAL_MODIFIED</option>
+                    <option value="APPROVAL_REJECTED">APPROVAL_REJECTED</option>
+                    <option value="APPROVAL_RESUMED">APPROVAL_RESUMED</option>
+                    <option value="APPROVAL_DENIED">APPROVAL_DENIED</option>
                   </select>
                 </div>
 
@@ -1920,12 +2731,29 @@ export default function Home() {
 
         return (
           <div className="aegis-operational-view aegis-access-view space-y-10 animate-fadeIn font-sans max-w-7xl mx-auto">
-            {/* Page Header */}
-            <div className="border-b border-white/5 pb-6">
-              <h1 className="text-2xl font-bold tracking-tight text-slate-100 uppercase">Access Control</h1>
-              <p className="text-sm text-slate-450 mt-1 uppercase tracking-wider font-semibold">
-                Manage authorized operators and their roles within the sovereign node.
-              </p>
+            {/* Page Header & Administrator Domain Scope Banner */}
+            <div className="border-b border-white/5 pb-6 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h1 className="text-2xl font-bold tracking-tight text-slate-100 uppercase">Access Control</h1>
+                  <p className="text-sm text-slate-450 mt-1 uppercase tracking-wider font-semibold">
+                    Manage authorized operators and their roles within the sovereign node.
+                  </p>
+                </div>
+                {user && (
+                  <div className="bg-[#0c1220] border border-blue-500/20 rounded-lg px-4 py-2.5 flex items-center space-x-3 text-xs font-mono shadow-sm">
+                    <Shield className="h-4 w-4 text-blue-400 shrink-0" />
+                    <div>
+                      <div className="text-slate-200">
+                        Administrator: <span className="font-bold text-blue-400">{user.username}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        Domain: <span className="text-emerald-400 font-bold uppercase">{user.department_name || "Administration"}</span> | Scope: <span className="text-slate-300">{user.department_name ? `${user.department_name} users only` : "System scope"}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* User Management KPI Row */}
@@ -1974,48 +2802,75 @@ export default function Home() {
                   </p>
                 </div>
 
-                <form onSubmit={handleProvisionUser} className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-slate-300 block">Username ID</label>
-                    <input
-                      type="text"
-                      value={provisionForm.username}
-                      onChange={(e) => setProvisionForm({ ...provisionForm, username: e.target.value })}
-                      placeholder="e.g. op_john_doe"
-                      className="w-full p-3 bg-[#05070c] border border-white/10 rounded-lg text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/30 transition-all font-mono"
-                    />
+                {/* Administrator Department Context / Security Gate */}
+                {!user?.department_id && !user?.department_name ? (
+                  <div className="bg-amber-500/10 border border-amber-500/20 p-4 rounded-lg space-y-2 text-amber-400 text-xs">
+                    <div className="flex items-start space-x-2 font-semibold">
+                      <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-400" />
+                      <span>Department Assignment Required</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Administrator department is not configured. User provisioning is unavailable until a department is assigned.
+                    </p>
                   </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-slate-300 block">Temporary Password</label>
-                    <input
-                      type="password"
-                      value={provisionForm.password}
-                      onChange={(e) => setProvisionForm({ ...provisionForm, password: e.target.value })}
-                      placeholder="Minimum 8 characters"
-                      className="w-full p-3 bg-[#05070c] border border-white/10 rounded-lg text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/30 transition-all font-mono"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-slate-300 block">Operator Role</label>
-                    <select
-                      value={provisionForm.role}
-                      onChange={(e) => setProvisionForm({ ...provisionForm, role: e.target.value })}
-                      className="w-full p-3 bg-[#05070c] border border-white/10 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-blue-500/30 cursor-pointer font-sans"
-                    >
-                      <option value="user">User (Standard Operator)</option>
-                      <option value="admin">Admin (System Controller)</option>
-                    </select>
-                  </div>
+                ) : (
+                  <>
+                    <div className="bg-[#05070c] border border-white/10 rounded-lg p-3 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Admin Domain</span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">
+                          [ {user.department_name || `Dept #${user.department_id}`} ] (READ ONLY)
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 leading-tight">
+                        New users provisioned by this administrator will belong to <strong className="text-slate-200">{user.department_name || `Dept #${user.department_id}`}</strong>.
+                      </p>
+                    </div>
 
-                  <Button
-                    type="submit"
-                    variant="primary"
-                    disabled={!provisionForm.username || !provisionForm.password}
-                    className="w-full h-10 mt-2"
-                  >
-                    Provision User
-                  </Button>
-                </form>
+                    <form onSubmit={handleProvisionUser} className="space-y-4">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-slate-300 block">Username ID</label>
+                        <input
+                          type="text"
+                          value={provisionForm.username}
+                          onChange={(e) => setProvisionForm({ ...provisionForm, username: e.target.value })}
+                          placeholder="e.g. op_john_doe"
+                          className="w-full p-3 bg-[#05070c] border border-white/10 rounded-lg text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/30 transition-all font-mono"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-slate-300 block">Temporary Password</label>
+                        <input
+                          type="password"
+                          value={provisionForm.password}
+                          onChange={(e) => setProvisionForm({ ...provisionForm, password: e.target.value })}
+                          placeholder="Minimum 8 characters"
+                          className="w-full p-3 bg-[#05070c] border border-white/10 rounded-lg text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500/30 transition-all font-mono"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-slate-300 block">Operator Role</label>
+                        <select
+                          value={provisionForm.role}
+                          onChange={(e) => setProvisionForm({ ...provisionForm, role: e.target.value })}
+                          className="w-full p-3 bg-[#05070c] border border-white/10 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-blue-500/30 cursor-pointer font-sans"
+                        >
+                          <option value="user">User (Standard Operator)</option>
+                          <option value="admin">Admin (System Controller)</option>
+                        </select>
+                      </div>
+
+                      <Button
+                        type="submit"
+                        variant="primary"
+                        disabled={!provisionForm.username || !provisionForm.password}
+                        className="w-full h-10 mt-2"
+                      >
+                        Provision User
+                      </Button>
+                    </form>
+                  </>
+                )}
 
                 {provisionSuccess && (
                   <div className="bg-emerald-500/5 border border-emerald-500/15 p-4 rounded-lg flex items-start space-x-3 text-emerald-400 text-xs">
@@ -2104,6 +2959,7 @@ export default function Home() {
                         <tr className="border-b border-white/5 text-slate-500 uppercase tracking-widest text-[9px] font-bold">
                           <th className="py-3 px-4">Username</th>
                           <th className="py-3 px-4">Role</th>
+                          <th className="py-3 px-4">Department</th>
                           <th className="py-3 px-4">Status</th>
                           <th className="py-3 px-4">Password Policy</th>
                           <th className="py-3 px-4">Created</th>
@@ -2123,6 +2979,11 @@ export default function Home() {
                                 <option value="user">User</option>
                                 <option value="admin">Admin</option>
                               </select>
+                            </td>
+                            <td className="py-4 px-4 font-mono text-[11px]">
+                              <span className="px-2 py-0.5 rounded bg-blue-500/5 border border-blue-500/15 text-blue-300">
+                                {u.department_name || (u.department_id ? `Dept #${u.department_id}` : "Unassigned")}
+                              </span>
                             </td>
                             <td className="py-4 px-4">
                               <button
@@ -2233,6 +3094,25 @@ export default function Home() {
               </div>
             )}
           </div>
+        );
+      }
+
+      case "approvals": {
+        return (
+          <ApprovalsView
+            initialApprovalId={targetApprovalId}
+            onClearInitialId={() => setTargetApprovalId(null)}
+            onNavigateToTab={(tab) => setActiveTab(tab as TabId)}
+            onApprovalResolved={async (apprId, res) => {
+              if (apprId) {
+                setApprovalStatusCache((prev) => ({ ...prev, [apprId]: res.status }));
+              }
+              await loadConversations();
+              if (activeSessionId) {
+                await handleSelectConversation(activeSessionId);
+              }
+            }}
+          />
         );
       }
 

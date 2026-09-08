@@ -39,6 +39,7 @@ import {
   SandboxFileRecord,
   SandboxExecutionRecord
 } from "../../lib/api/sandbox";
+import { ragApi } from "../../lib/api/rag";
 
 export interface SandboxHistoryItem {
   id: string;
@@ -556,13 +557,18 @@ export default function SandboxView({
                       </Button>
                     </Tooltip>
                     <Tooltip title="Download File">
-                      <a
-                        href={`http://127.0.0.1:8000/sandbox/artifacts/${record.id}/download`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        <Button size="small" icon={<DownloadOutlined />} />
-                      </a>
+                      <Button
+                        size="small"
+                        icon={<DownloadOutlined />}
+                        onClick={async () => {
+                          try {
+                            await ragApi.downloadSandboxArtifact(record.id, record.filename);
+                            message.success(`Downloaded '${record.filename}'`);
+                          } catch (err: any) {
+                            message.error(err.message || "Failed to download sandbox file.");
+                          }
+                        }}
+                      />
                     </Tooltip>
                   </Space>
                 )

@@ -28,24 +28,26 @@ def init_db() -> None:
             )
         """)
 
-        # Seed standard initial departments if none exist
-        cursor.execute("SELECT COUNT(*) FROM departments")
-        if cursor.fetchone()[0] == 0:
-            initial_departments = [
-                ("Administration", "Executive and administrative operations"),
-                ("Operations", "Plant and facility operations"),
-                ("Engineering", "Design, automation, and engineering"),
-                ("Maintenance", "Equipment repair and preventive maintenance"),
-                ("Safety", "Industrial safety and regulatory compliance"),
-                ("Finance", "Financial auditing and procurement accounting"),
-                ("Procurement", "Vendor management and materials acquisition"),
-                ("IT", "Information systems and local infrastructure")
-            ]
-            cursor.executemany(
-                "INSERT INTO departments (name, description, is_active) VALUES (?, ?, 1)",
-                initial_departments
+        # Seed standard initial departments and official industrial domains
+        industrial_departments = [
+            ("Administration", "Executive and administrative operations"),
+            ("Operations", "Plant and facility operations"),
+            ("Engineering", "Design, automation, and engineering"),
+            ("Maintenance", "Equipment repair and preventive maintenance"),
+            ("Safety", "Industrial safety and regulatory compliance"),
+            ("Finance", "Financial auditing and procurement accounting"),
+            ("Procurement", "Vendor management and materials acquisition"),
+            ("IT", "Information systems and local infrastructure"),
+            ("Operations & Maintenance", "Plant operations, operating procedures, and equipment maintenance"),
+            ("HSE", "Health, safety, environmental compliance, and hazard management"),
+            ("Procurement & Commercial", "Vendor contracts, procurement, and commercial comparisons")
+        ]
+        for dept_name, dept_desc in industrial_departments:
+            cursor.execute(
+                "INSERT OR IGNORE INTO departments (name, description, is_active) VALUES (?, ?, 1)",
+                (dept_name, dept_desc)
             )
-            conn.commit()
+        conn.commit()
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -303,6 +305,21 @@ def init_db() -> None:
             except sqlite3.OperationalError:
                 pass
 
+        # Backfill owner_id and owner_department for generated_documents linked to conversations
+        try:
+            cursor.execute("""
+                UPDATE generated_documents SET 
+                    owner_id = (SELECT user_id FROM conversations WHERE conversations.id = generated_documents.conversation_id),
+                    owner_username = (SELECT username FROM conversations WHERE conversations.id = generated_documents.conversation_id),
+                    owner_department_id = (SELECT users.department_id FROM users JOIN conversations ON users.id = conversations.user_id WHERE conversations.id = generated_documents.conversation_id),
+                    owner_department_name = (SELECT users.department_name FROM users JOIN conversations ON users.id = conversations.user_id WHERE conversations.id = generated_documents.conversation_id)
+                WHERE conversation_id IS NOT NULL AND conversation_id != '' 
+                  AND EXISTS (SELECT 1 FROM conversations WHERE conversations.id = generated_documents.conversation_id AND conversations.user_id IS NOT NULL)
+            """)
+            conn.commit()
+        except Exception:
+            pass
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sandbox_artifacts (
                 id TEXT PRIMARY KEY,
@@ -377,6 +394,66 @@ def init_db() -> None:
                 conn.commit()
             except sqlite3.OperationalError:
                 pass
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS approval_requests (
+                id TEXT PRIMARY KEY,
+                plan_id TEXT,
+                conversation_id TEXT,
+                step_id TEXT,
+                requester_id INTEGER,
+                requester_username TEXT NOT NULL DEFAULT '',
+                reviewer_id INTEGER,
+                reviewer_username TEXT,
+                reviewer_role TEXT,
+                department_id INTEGER,
+                department_name TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                action_type TEXT NOT NULL DEFAULT 'DOCUMENT_APPROVAL',
+                proposed_payload_json TEXT NOT NULL DEFAULT '{}',
+                modified_payload_json TEXT,
+                rejection_reason TEXT,
+                created_at TEXT DEFAULT (datetime('now', 'utc')),
+                reviewed_at TEXT,
+                expires_at TEXT,
+                FOREIGN KEY(department_id) REFERENCES departments(id),
+                FOREIGN KEY(requester_id) REFERENCES users(id),
+                FOREIGN KEY(reviewer_id) REFERENCES users(id)
+            )
+        """)
+        for col, col_type in [
+            ("plan_id", "TEXT"),
+            ("conversation_id", "TEXT"),
+            ("step_id", "TEXT"),
+            ("requester_id", "INTEGER"),
+            ("requester_username", "TEXT NOT NULL DEFAULT ''"),
+            ("reviewer_id", "INTEGER"),
+            ("reviewer_username", "TEXT"),
+            ("reviewer_role", "TEXT"),
+            ("department_id", "INTEGER"),
+            ("department_name", "TEXT DEFAULT ''"),
+            ("status", "TEXT NOT NULL DEFAULT 'PENDING'"),
+            ("action_type", "TEXT NOT NULL DEFAULT 'DOCUMENT_APPROVAL'"),
+            ("proposed_payload_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("modified_payload_json", "TEXT"),
+            ("rejection_reason", "TEXT"),
+            ("created_at", "TEXT"),
+            ("reviewed_at", "TEXT"),
+            ("expires_at", "TEXT")
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE approval_requests ADD COLUMN {col} {col_type}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+        # Dedicated indexes for approval queries
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_status ON approval_requests(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_requester ON approval_requests(requester_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_reviewer ON approval_requests(reviewer_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_department ON approval_requests(department_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_conversation ON approval_requests(conversation_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_plan ON approval_requests(plan_id)")
 
         conn.commit()
     finally:

@@ -140,22 +140,8 @@ export default function DocumentsView(p: Props) {
 
   const handleDownloadGenerated = async (doc: GeneratedDocument) => {
     try {
-      const token = getToken();
-      const res = await fetch(`${env.apiUrl}/documents/generated/${doc.id}/download`, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
-      if (!res.ok) throw new Error("Download request failed.");
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = doc.filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      await ragApi.downloadGeneratedDocument(doc.id, doc.filename);
+      message.success(`Downloaded '${doc.filename}'`);
     } catch (e: any) {
       message.error(e.message || "Failed to download document.");
     }
@@ -163,25 +149,8 @@ export default function DocumentsView(p: Props) {
 
   const handleDownloadSource = async (doc: DocumentInfo) => {
     try {
-      const token = getToken();
-      const res = await fetch(`${env.apiUrl}/documents/${doc.id}/download`, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => null);
-        throw new Error(errJson?.detail || "Download request failed.");
-      }
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = doc.filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      await ragApi.downloadUploadedDocument(doc.id, doc.filename);
+      message.success(`Downloaded '${doc.filename}'`);
     } catch (e: any) {
       message.error(e.message || "Failed to download document.");
     }

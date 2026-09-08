@@ -258,7 +258,8 @@ def can_access_generated_document(
 ) -> bool:
     """
     Authoritative access gate for generated documents (PDF/DOCX reports).
-    Ensures generated reports inherit and respect source document confidentiality.
+    Ensures generated reports inherit and respect requester ownership, conversation binding,
+    and source document confidentiality without privilege leakage or IDOR vulnerability.
     """
     user_attrs = _extract_user_attrs(current_user)
     user_id = user_attrs["id"]
@@ -290,32 +291,74 @@ def can_access_generated_document(
         owner_id = doc.get("owner_id")
         owner_dept_id = doc.get("owner_department_id")
         visibility = (doc.get("visibility") or "PRIVATE").upper().strip()
+        conv_id = doc.get("conversation_id")
 
-        # 1. Owner has full access
-        if user_id is not None and owner_id is not None and owner_id == user_id:
-            return True
+        # 1. Direct Owner Access (Original Requester)
+        if user_id is not None and owner_id is not None:
+            try:
+                if int(owner_id) == int(user_id):
+                    return True
+            except (ValueError, TypeError):
+                pass
 
-        # 2. Administrator has access
+        # 2. Conversation Requester Access (Original task author who initiated conversation)
+        if conv_id and user_id is not None:
+            try:
+                cursor.execute("SELECT user_id, department_id FROM conversations WHERE id = ?", (str(conv_id),))
+                c_row = cursor.fetchone()
+                if c_row:
+                    conv_user_id = c_row["user_id"] if isinstance(c_row, sqlite3.Row) else c_row[0]
+                    if conv_user_id is not None and int(conv_user_id) == int(user_id):
+                        return True
+            except Exception:
+                pass
+
+        # 3. System Administrator Access
         if is_admin:
             return True
 
-        # 3. Organization policy
+        # 4. Resolve owner department if not stored on document row
+        if owner_dept_id is None and owner_id is not None:
+            try:
+                cursor.execute("SELECT department_id FROM users WHERE id = ?", (int(owner_id),))
+                u_row = cursor.fetchone()
+                if u_row:
+                    owner_dept_id = u_row["department_id"] if isinstance(u_row, sqlite3.Row) else u_row[0]
+            except Exception:
+                pass
+
+        # 5. Organization-wide Policy
         if visibility == "ORGANIZATION":
             return True
 
-        # 4. Department policy
-        if visibility == "DEPARTMENT" and user_dept_id is not None and owner_dept_id is not None and user_dept_id == owner_dept_id:
-            return True
-
-        # 5. Check if derived from accessible source documents
-        src_ids = doc.get("source_document_ids", "")
-        if src_ids:
-            src_list = [s.strip() for s in src_ids.split(",") if s.strip()]
-            if src_list:
-                # If user can access all source documents, grant access
-                can_access_sources = all(can_access_document(current_user, s_id, "READ", db=conn) for s_id in src_list)
-                if can_access_sources:
+        # 6. Department-scoped Policy
+        if visibility == "DEPARTMENT" and user_dept_id is not None and owner_dept_id is not None:
+            try:
+                if int(user_dept_id) == int(owner_dept_id):
                     return True
+            except (ValueError, TypeError):
+                pass
+
+        # 7. Inherited Source Document Access (e.g. user has READ access to all cited source materials)
+        src_ids = doc.get("source_document_ids", "")
+        src_list = []
+        if isinstance(src_ids, list):
+            src_list = [str(s).strip() for s in src_ids if str(s).strip()]
+        elif isinstance(src_ids, str) and src_ids.strip():
+            try:
+                import json
+                parsed = json.loads(src_ids)
+                if isinstance(parsed, list):
+                    src_list = [str(s).strip() for s in parsed if str(s).strip()]
+                elif isinstance(parsed, str) and parsed.strip():
+                    src_list = [parsed.strip()]
+            except Exception:
+                src_list = [s.strip().strip("'\"[]") for s in src_ids.split(",") if s.strip().strip("'\"[]")]
+
+        if src_list:
+            can_access_sources = all(can_access_document(current_user, s_id, "READ", db=conn) for s_id in src_list)
+            if can_access_sources:
+                return True
 
         return False
     finally:

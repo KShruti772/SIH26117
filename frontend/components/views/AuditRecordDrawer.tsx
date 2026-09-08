@@ -69,6 +69,12 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   AUTHORIZATION_DENIED: "Action blocked by Role-Based Access Control policy.",
   AUTHORIZATION_FAILURE: "Access request denied due to insufficient permissions or ownership mismatch.",
   DOCUMENT_ACCESS_DENIED: "Confidential document access denied by sovereign ACL policy.",
+  APPROVAL_REQUESTED: "Consequential workflow reached Human-in-the-Loop gate; approval request created.",
+  APPROVAL_APPROVED: "Reviewer authorized consequential workflow; execution resumed to compile deliverable.",
+  APPROVAL_MODIFIED: "Reviewer applied replanning constraints; workflow replanned and compiled.",
+  APPROVAL_REJECTED: "Reviewer denied consequential workflow; execution halted without deliverable.",
+  APPROVAL_RESUMED: "Execution resumed authoritatively from saved approval state.",
+  APPROVAL_DENIED: "Unauthorized approval action blocked by RBAC or department boundary policy.",
 };
 
 export default function AuditRecordDrawer({ log, open, onClose }: AuditRecordDrawerProps) {

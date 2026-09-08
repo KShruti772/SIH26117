@@ -27,14 +27,18 @@ from backend.app.config.settings import settings
 from backend.security.database import init_db, get_db_path
 from backend.security.auth import hash_password, verify_password
 
-# Configured demo account definitions
+# Configured demo account definitions: (username, role, plain_password, department_name)
 DEMO_ACCOUNTS = [
-    ("aegis_admin", "admin", "Aegis@Admin2026!"),
-    ("operator1", "user", "Aegis@User1#2026"),
-    ("operator2", "user", "Aegis@User2#2026"),
-    ("operator3", "user", "Aegis@User3#2026"),
-    ("operator4", "user", "Aegis@User4#2026"),
-    ("operator5", "user", "Aegis@User5#2026"),
+    ("aegis_admin", "admin", "Aegis@Admin2026!", "Administration"),
+    ("engineering_admin", "admin", "Aegis@EngAdmin2026!", "Engineering"),
+    ("operations_admin", "admin", "Aegis@OpsAdmin2026!", "Operations & Maintenance"),
+    ("hse_admin", "admin", "Aegis@HseAdmin2026!", "HSE"),
+    ("procurement_admin", "admin", "Aegis@ProcAdmin2026!", "Procurement & Commercial"),
+    ("operator1", "user", "Aegis@User1#2026", "Operations"),
+    ("operator2", "user", "Aegis@User2#2026", "Operations"),
+    ("operator3", "user", "Aegis@User3#2026", "Engineering"),
+    ("operator4", "user", "Aegis@User4#2026", "HSE"),
+    ("operator5", "user", "Aegis@User5#2026", "Procurement & Commercial"),
 ]
 
 def seed_demo_users(db_path: str = None) -> dict:
@@ -54,10 +58,21 @@ def seed_demo_users(db_path: str = None) -> dict:
     conn = sqlite3.connect(target_db)
     try:
         cursor = conn.cursor()
-        for username, role, plain_password in DEMO_ACCOUNTS:
+        for item in DEMO_ACCOUNTS:
+            username, role, plain_password = item[0], item[1], item[2]
+            target_dept_name = item[3] if len(item) > 3 else ("Administration" if role == "admin" else "Operations")
+            
             cursor.execute("SELECT id, role, password_hash FROM users WHERE username = ?", (username,))
             row = cursor.fetchone()
             
+            cursor.execute("SELECT id, name FROM departments WHERE name = ?", (target_dept_name,))
+            dept_row = cursor.fetchone()
+            if dept_row:
+                dept_id, dept_name = dept_row[0], dept_row[1]
+            else:
+                dept_id = 1 if role == "admin" else 2
+                dept_name = target_dept_name
+
             if row:
                 stored_hash = row[2]
                 # Check if stored hash is corrupted / malformed (e.g. not a valid bcrypt hash)
@@ -67,21 +82,24 @@ def seed_demo_users(db_path: str = None) -> dict:
                 if not is_valid_bcrypt or not is_matching:
                     new_hash = hash_password(plain_password)
                     cursor.execute("""
-                        UPDATE users SET password_hash = ?, is_active = 1 WHERE username = ?
-                    """, (new_hash, username))
+                        UPDATE users SET password_hash = ?, is_active = 1, department_id = ?, department_name = ? WHERE username = ?
+                    """, (new_hash, dept_id, dept_name, username))
                     repaired_count += 1
                     print(f"[REPAIR] {username} (restored valid bcrypt hash)")
                 else:
+                    cursor.execute("""
+                        UPDATE users SET department_id = COALESCE(department_id, ?), department_name = COALESCE(department_name, ?) WHERE username = ?
+                    """, (dept_id, dept_name, username))
                     existing_count += 1
                     print(f"[EXISTS] {username} ({row[1]})")
             else:
                 hashed = hash_password(plain_password)
                 cursor.execute("""
-                    INSERT INTO users (username, password_hash, role, is_active, must_change_password)
-                    VALUES (?, ?, ?, 1, 0)
-                """, (username, hashed, role))
+                    INSERT INTO users (username, password_hash, role, department_id, department_name, is_active, must_change_password)
+                    VALUES (?, ?, ?, ?, ?, 1, 0)
+                """, (username, hashed, role, dept_id, dept_name))
                 created_count += 1
-                print(f"[CREATE] {username} ({role})")
+                print(f"[CREATE] {username} ({role}) - {dept_name}")
                 
         conn.commit()
     finally:

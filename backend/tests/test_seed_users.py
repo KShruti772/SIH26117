@@ -37,9 +37,9 @@ class TestSeedUsers(unittest.TestCase):
         conn.close()
 
     def test_seed_demo_users_creates_all_six_accounts(self):
-        """1, 2, 3, 4. Verify seed operation creates 6 active accounts (1 admin, 5 user)."""
+        """1, 2, 3, 4. Verify seed operation creates 10 active accounts (5 admin, 5 user)."""
         res = seed_demo_users(db_path=TEST_SEED_DB_PATH)
-        self.assertEqual(res["created"], 6)
+        self.assertEqual(res["created"], len(DEMO_ACCOUNTS))
         self.assertEqual(res["existing"], 0)
 
         conn = sqlite3.connect(TEST_SEED_DB_PATH)
@@ -48,13 +48,14 @@ class TestSeedUsers(unittest.TestCase):
 
         cursor.execute("SELECT * FROM users ORDER BY id ASC")
         users = cursor.fetchall()
-        self.assertEqual(len(users), 6)
+        self.assertEqual(len(users), len(DEMO_ACCOUNTS))
 
         admin_users = [u for u in users if u["role"] == "admin"]
         user_users = [u for u in users if u["role"] == "user"]
 
-        self.assertEqual(len(admin_users), 1)
-        self.assertEqual(admin_users[0]["username"], "aegis_admin")
+        self.assertEqual(len(admin_users), 5)
+        admin_names = sorted([u["username"] for u in admin_users])
+        self.assertEqual(admin_names, ["aegis_admin", "engineering_admin", "hse_admin", "operations_admin", "procurement_admin"])
 
         self.assertEqual(len(user_users), 5)
         user_names = [u["username"] for u in user_users]
@@ -74,7 +75,8 @@ class TestSeedUsers(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        for username, role, plain_password in DEMO_ACCOUNTS:
+        for item in DEMO_ACCOUNTS:
+            username, role, plain_password = item[0], item[1], item[2]
             cursor.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
             row = cursor.fetchone()
             self.assertIsNotNone(row)
@@ -94,12 +96,12 @@ class TestSeedUsers(unittest.TestCase):
     def test_idempotent_reexecution_preserves_existing_users(self):
         """7, 8. Verify running seed operation twice does not duplicate records or overwrite passwords/roles."""
         res1 = seed_demo_users(db_path=TEST_SEED_DB_PATH)
-        self.assertEqual(res1["created"], 6)
+        self.assertEqual(res1["created"], len(DEMO_ACCOUNTS))
 
         # Re-execution
         res2 = seed_demo_users(db_path=TEST_SEED_DB_PATH)
         self.assertEqual(res2["created"], 0)
-        self.assertEqual(res2["existing"], 6)
+        self.assertEqual(res2["existing"], len(DEMO_ACCOUNTS))
 
         conn = sqlite3.connect(TEST_SEED_DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -107,7 +109,7 @@ class TestSeedUsers(unittest.TestCase):
 
         cursor.execute("SELECT COUNT(*) FROM users")
         total_count = cursor.fetchone()[0]
-        self.assertEqual(total_count, 6)
+        self.assertEqual(total_count, len(DEMO_ACCOUNTS))
 
         conn.close()
 

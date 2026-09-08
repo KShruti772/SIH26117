@@ -18,8 +18,13 @@ data/private/
 # Local vector databases
 vectorstore/
 
-# Runtime outputs
+# Runtime outputs and generated artifacts
 outputs/
+data/generated/
+data/exports/
+data/sandbox/
+sandbox_runs/
+sandbox_runs_test/
 
 # Logs
 *.log

@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, apiFetchBlob, triggerBrowserBlobDownload } from "./client";
 
 export interface DocumentInfo {
   id: string;
@@ -299,5 +299,51 @@ export const ragApi = {
     return apiFetch<{ status: string; message: string }>(`/documents/${id}`, {
       method: "DELETE",
     });
+  },
+
+  /**
+   * GET /documents/generated/:id/download
+   * Authenticated stream download of a generated PDF or DOCX report.
+   */
+  async downloadGeneratedDocument(documentId: string, fallbackFilename?: string): Promise<{ filename: string; size: number }> {
+    const cleanId = String(documentId).trim();
+    const result = await apiFetchBlob(
+      `/documents/generated/${encodeURIComponent(cleanId)}/download`,
+      { method: "GET" },
+      fallbackFilename || `deliverable_${cleanId}.pdf`
+    );
+    triggerBrowserBlobDownload(result.blob, result.filename);
+    return { filename: result.filename, size: result.size };
+  },
+
+  /**
+   * GET /documents/:id/download
+   * Authenticated stream download of an uploaded source knowledge base document.
+   */
+  async downloadUploadedDocument(documentId: string, fallbackFilename?: string): Promise<{ filename: string; size: number }> {
+    const cleanId = String(documentId).trim();
+    const result = await apiFetchBlob(
+      `/documents/${encodeURIComponent(cleanId)}/download`,
+      { method: "GET" },
+      fallbackFilename || `document_${cleanId}.pdf`
+    );
+    triggerBrowserBlobDownload(result.blob, result.filename);
+    return { filename: result.filename, size: result.size };
+  },
+
+  /**
+   * GET /sandbox/artifacts/:artifactId/download
+   * Authenticated stream download of a sandbox execution output file.
+   */
+  async downloadSandboxArtifact(artifactId: string, fallbackFilename?: string): Promise<{ filename: string; size: number }> {
+    const cleanId = String(artifactId).trim();
+    const result = await apiFetchBlob(
+      `/sandbox/artifacts/${encodeURIComponent(cleanId)}/download`,
+      { method: "GET" },
+      fallbackFilename || `artifact_${cleanId}`
+    );
+    triggerBrowserBlobDownload(result.blob, result.filename);
+    return { filename: result.filename, size: result.size };
   }
 };
+

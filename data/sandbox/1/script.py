@@ -1,2 +1,1 @@
-import math
-print(math.factorial(20))
+print('Testing sandbox reload isolation: ' + str(2**16))

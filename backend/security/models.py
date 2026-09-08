@@ -87,3 +87,23 @@ class DocumentPermissionResponse(BaseModel):
     permission: str
     granted_by: Optional[int] = None
     created_at: str
+
+# Human-In-The-Loop (HITL) State and Action Enums
+from enum import Enum
+
+class ApprovalStatus(str, Enum):
+    """Canonical lifecycle states for Human-In-The-Loop approval requests."""
+    PENDING = "PENDING"
+    WAITING_FOR_HUMAN = "WAITING_FOR_HUMAN"
+    APPROVED = "APPROVED"
+    MODIFIED = "MODIFIED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    FAILED = "FAILED"
+
+class ApprovalActionType(str, Enum):
+    """Canonical action categories requiring human oversight."""
+    DOCUMENT_APPROVAL = "DOCUMENT_APPROVAL"
+    SANDBOX_EXECUTION_APPROVAL = "SANDBOX_EXECUTION_APPROVAL"
+    CRITICAL_ACTION_APPROVAL = "CRITICAL_ACTION_APPROVAL"
+
