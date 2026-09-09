@@ -189,12 +189,16 @@ body {
 .aegis-navigation-toggle:hover { color: #edf3fa !important; background: #162131 !important; }
 .aegis-page-container { min-height: calc(100vh - 64px); overflow: auto; padding: 28px; background: #0b1018; }
 .aegis-page-content { width: 100%; max-width: 1560px; margin: 0 auto; }
+.aegis-desktop-sider { height: 100vh; position: sticky; top: 0; left: 0; z-index: 100; background: #0b1018 !important; overflow: hidden; }
+.aegis-desktop-sider .aegis-sider-content { height: 100vh; }
+
 .aegis-navigation-drawer .ant-drawer-content { background: #0b1018; }
 .aegis-navigation-drawer .ant-drawer-header { min-height: 48px; padding: 8px 12px; border-bottom-color: #202c3b; background: #0b1018; }
 .aegis-navigation-drawer .ant-drawer-close { color: #b7c8d8; }
 .aegis-navigation-drawer .aegis-sider-content { height: calc(100vh - 48px); }
 
 @media (max-width: 767px) {
+  .aegis-desktop-sider { display: none !important; }
   .aegis-header { padding: 0 16px; }
   .aegis-header-local, .aegis-header-user .ant-typography, .aegis-header-brand { display: none; }
   .aegis-page-container { padding: 16px; }

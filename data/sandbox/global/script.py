@@ -1,3 +1,2 @@
-import math
-res = math.factorial(20)
-print(f'FACTORIAL_20={res}')
+val = sum([i * 2 for i in range(5)])
+print(f'COMPUTED_SUM={val}')

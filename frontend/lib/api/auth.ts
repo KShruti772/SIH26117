@@ -4,7 +4,7 @@ import { setToken, clearToken } from "../security/token";
 export interface User {
   id: number;
   username: string;
-  role: "admin" | "user";
+  role: "admin" | "reviewer" | "supervisor" | "lead" | "user" | string;
   department_id?: number;
   department_name?: string;
   is_active: boolean;

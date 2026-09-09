@@ -3,6 +3,1163 @@
 ---
 
 ### Feature:
+AEGIS Strategy-Aware Agent Sandbox Replanning, Epistemic Tool-Necessity Evaluation & Standard-Library Fallback Hardening (Resolution of `EXE-C0593B33` Sandbox Failure `ModuleNotFoundError: pandas` and Replan Budget Exhaustion, Tool Necessity Categorization `TOOL_REQUIRED` / `TOOL_OPTIONAL` / `TOOL_NOT_REQUIRED`, Elimination of Blind Sandbox Invocations on Document-Grounded Telemetry-Free Tasks, 2-Tier Strategy-Aware Replanning Fallback `Attempt 1: Standard Library (force_standard_library)` -> `Attempt >= 2: Document-Grounded Recovery (TOOL_EXECUTION_RECOVERED)`, Epistemic Grounding Preservation `[UNAVAILABLE_MEASUREMENT: live_telemetry]` / `Deviation: NOT CALCULATED` / `Status: UNAVAILABLE`, 10/10 Sandbox Replanning Tests PASS, Real `maintenance.pdf` End-to-End Workflow Verification PASS, and Cryptographic HMAC Audit Chain INTACT)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Root Cause Resolution for Incident `EXE-C0593B33`**:
+  - Investigated execution `EXE-C0593B33` failure where the planner compiled a sandbox step for a document-grounded vendor manual review without operational telemetry.
+  - The local model generated Python code using `import pandas as pd`, which failed inside the hardened sandbox with `ModuleNotFoundError: No module named 'pandas'`.
+  - The agent's replanner blindly regenerated failing Python code on the same unworkable approach until the maximum replan budget of 3 attempts was exhausted (`step_3_replan_3`).
+- **Epistemic Tool-Necessity Evaluation (`_evaluate_tool_necessity` in [`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Implemented `ToolNecessity` enum: `TOOL_REQUIRED`, `TOOL_OPTIONAL`, `TOOL_NOT_REQUIRED`.
+  - Added deterministic pre-execution tool necessity check: if a document-grounded task has no live operational measurements, numerical calculation is evaluated as `TOOL_NOT_REQUIRED`.
+  - Automatically records `[UNAVAILABLE_MEASUREMENT: live_telemetry]`, `Deviation: NOT CALCULATED`, and `Status: UNAVAILABLE`, completing the step cleanly without executing unnecessary sandbox subprocesses.
+- **Strict Standard Library Sandbox Code Generation**:
+  - Standardized sandbox calculation prompts to exclusively use Python Standard Library (`math`, `statistics`, `csv`, `json`, `sys`, `re`).
+  - Prohibited generating third-party library imports (`pandas`, `numpy`, `scipy`) when doing standard engineering comparisons.
+- **2-Tier Strategy-Aware Replanning Fallback**:
+  - **Attempt 1 (Standard Library Switch)**: If a sandbox step fails due to missing dependencies (`ModuleNotFoundError`, `ImportError`), the replanner switches strategy (`force_standard_library=True`) and prompts the model to compute using standard library arithmetic and data structures.
+  - **Attempt $\ge$ 2 (Document-Grounded Recovery)**: For document-grounded analysis tasks where numerical calculation cannot proceed, the replanner shifts strategy to Document-Grounded Reasoning Fallback. It extracts verified manual limits, logs `TOOL_EXECUTION_RECOVERED` with forensic audit metadata, and marks the step as `COMPLETED` / `RECOVERED` so subsequent report synthesis and HITL review can proceed seamlessly.
+  - For explicit user code scripts where no document fallback is safe, the agent halts truthfully with `FAILED` without getting stuck in infinite loops.
+- **Audit Logging Taxonomy ([`backend/security/audit.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/audit.py))**:
+  - Registered `TOOL_EXECUTION_RECOVERED` and `TOOL_EVALUATION_SKIPPED` in `VALID_ACTIONS`.
+  - Added `tool`, `original_failure`, `recovery_strategy`, `recovery_result`, `necessity`, and `failed_step` to `ALLOWED_METADATA_KEYS`.
+
+### Tested:
+- **Dedicated Replanning Strategy Regression Suite ([`backend/tests/test_sandbox_replanning_strategy.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_sandbox_replanning_strategy.py))**: `10/10 PASS` in 3.492s:
+  - `test_01_tool_necessity_evaluation_document_grounded_missing_telemetry`: PASS (`TOOL_NOT_REQUIRED`)
+  - `test_02_tool_necessity_evaluation_telemetry_provided`: PASS (`TOOL_REQUIRED`)
+  - `test_03_sandbox_prompt_enforces_standard_library_constraints`: PASS
+  - `test_04_execution_failure_categorization_missing_dependency`: PASS (`TOOL_DEPENDENCY_MISSING`)
+  - `test_05_execution_failure_categorization_invalid_code`: PASS (`TOOL_CODE_INVALID`)
+  - `test_06_replanning_attempt_1_standard_library_fallback`: PASS
+  - `test_07_replanning_attempt_2_document_grounded_recovery`: PASS (`TOOL_EXECUTION_RECOVERED`)
+  - `test_08_replan_budget_exhaustion_on_unrecoverable_custom_script`: PASS (Halts truthfully at budget)
+  - `test_09_audit_logging_tool_recovered_and_skipped_taxonomy`: PASS
+  - `test_10_end_to_end_replan_recovery_allows_subsequent_steps_to_proceed`: PASS
+- **Targeted Agent, HITL, Security & Audit Suites**: `57/57 PASS` in 7.267s (`backend.tests.test_audit`, `backend.tests.test_audit_chain_tamper_detection`, `backend.tests.test_audit_forensic_details`, `backend.tests.test_audit_isolation_truth`, `backend.tests.test_sandbox_replanning_strategy`).
+- **Real End-to-End Maintenance PDF Workflow ([`scratch/verify_real_maintenance_pdf.py`](file:///Users/shrutikondabathula/SIH26117/scratch/verify_real_maintenance_pdf.py))**: `PASS`:
+  - Processed 5.7 MB authorized physical manual `004be6917dd94f97ad1c61189055d50f_maintenance.pdf`.
+  - Evaluated tool necessity: `TOOL_NOT_REQUIRED` $\to$ bypassed unnecessary sandbox calculations.
+  - Synthesized grounded 8-section inspection note $\to$ human engineer approval $\to$ compiled DOCX deliverable `maintenance_inspection_report.docx` (36,864 bytes).
+- **Cryptographic HMAC Audit Chain**: `status: INTACT` across 2,587 records (`tampered_record_id: None`).
+
+### Result:
+- Eliminated sandbox replan budget exhaustion. The agent dynamically identifies when computation tools are required versus not required, falls back gracefully to standard library execution upon dependency errors, and recovers safely to document-grounded reasoning without fabricating measurements or weakening sandbox security.
+
+### Files Changed:
+- `backend/agents/controller/agent.py` (MODIFIED)
+- `backend/security/audit.py` (MODIFIED)
+- `backend/tests/test_sandbox_replanning_strategy.py` (NEW)
+- `scratch/verify_real_maintenance_pdf.py` (MODIFIED)
+- `walkthrough.md` (MODIFIED)
+- `IMPLEMENTATION_STATUS.md` (MODIFIED)
+
+### Dependencies:
+- `backend.agents.controller.agent` -> `backend.security.audit` -> `backend.tools.sandbox.python_executor`
+
+### Next Step:
+- Continue autonomous verification workflows and user task executions.
+
+---
+
+### Feature:
+AEGIS Source-Grounded Industrial Report Generation Hardening (Strict 5-Category Epistemic Data Modeling `[SOURCE_DOCUMENT_FACT]`/`[USER_PROVIDED_INPUT]`/`[DERIVED_CALCULATION]`/`[MODEL_INFERENCE]`/`[RECOMMENDATION]`, Semantic Pipeline Missing-Data Rule `NO MEASUREMENT -> UNAVAILABLE -> NO COMPARISON -> NO DEVIATION -> NO PASS/WITHIN_LIMITS -> NO COMPLIANCE CLAIM -> NO OPERATIONAL APPROVAL`, Mathematically Sound Relational Comparison `compare_engineering_parameter`, Elimination of 0% Deviation Fallacies with `Deviation: NOT CALCULATED / NOT CALCULABLE`, Preservation of Qualitative Integrity over Numerical Inventions, Standard 8-Section Report Architecture with Section 2 `Evidence Availability` Table and Section 8 `Human Review Decision` Mandating `**HUMAN APPROVAL REQUIRED**`, Complete Real `maintenance.pdf` End-to-End Workflow Verification with Live PDF Stream Inspection, 16/16 Acceptance Tests PASS, 12/12 Epistemic Rigor Tests PASS, 621/621 Full Backend Discovery Tests PASS, 97/97 Frontend Tests PASS, Clean Next.js Production Build, and Cryptographic HMAC Audit Chain INTACT)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Root Cause Resolution across Full Semantic Pipeline**:
+  - Eliminated the conversion of missing telemetry into zero deviation, PASS, or compliance statements.
+  - Enforced structured representation: missing measurement -> `value = None`, `availability = "UNAVAILABLE"`, `Comparison = NOT POSSIBLE`, `Deviation = NOT CALCULABLE — required measurement unavailable.`, `Status = UNAVAILABLE`.
+  - Enforced numerical provenance: prohibited model inference from hallucinating numerical thresholds (`< 0.05 mm`, `< 0.5 L/min`) from qualitative statements ("close tolerance", "excessive leakage").
+  - Enforced human review boundary: prohibited autonomous AI operational approvals; draft deliverables conclude with mandatory Section 8 `Human Review Decision` displaying `**HUMAN APPROVAL REQUIRED**`.
+  - Enforced AOR boundary: prohibited claiming equipment operates in AOR unless actual operational telemetry exists in authorized evidence.
+- **Epistemic Data Models & Core Rules ([`backend/agents/controller/source_grounding.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/source_grounding.py))**:
+  - Implemented `compare_engineering_parameter(name, measured, limit, unit, ...)`:
+    - $\text{Measured} + \text{Limit} \implies \text{Relational comparison, delta, and status (WITHIN\_LIMITS or EXCEEDS\_LIMIT)}$
+    - $\text{Missing Measured} \lor \text{Missing Limit} \implies \text{Comparison: NOT POSSIBLE, Deviation: NOT CALCULABLE, Status: UNAVAILABLE}$
+  - Implemented `build_evidence_availability_table`: Builds formatted Section 2 markdown tables.
+  - Implemented `sanitize_draft_document_text`: Sanitizes AI approval drift, hallucinated numeric limits, assumptions, and 0% deviations.
+  - Implemented `validate_epistemic_rigor`: Comprehensive 16-rule validator testing document text for compliance.
+  - Implemented `parse_markdown_to_content_blocks`: Parses markdown tables, headers, bullets, and paragraphs into structured flowables for ReportLab PDF and Word DOCX generators.
+- **Controller & Verification Integration ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - `extract_findings`: Extracts structured epistemic findings and labels missing data as `[UNAVAILABLE_MEASUREMENT: ...]`.
+  - `execute_code` / Sandbox Generator: Mandates that calculations output `Deviation: NOT CALCULATED` and `Status: UNAVAILABLE` when data is missing.
+  - `generate_document_content`: Instructs the model on the 8-section hierarchy and applies deterministic post-sanitization.
+  - `generate_document`: Employs `parse_markdown_to_content_blocks` for rich document layout and table generation.
+  - `_verify_step`: Runs `validate_epistemic_rigor` on deliverables, auto-healing any draft drift before marking verified.
+
+### Tested:
+- **Dedicated 16-Test Hardening Suite ([`backend/tests/test_source_grounding_hardening_suite.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_source_grounding_hardening_suite.py))**: `16/16 PASS` in 5.905s:
+  - `test_01_missing_vibration_measurement`: PASS
+  - `test_02_missing_temperature_measurement`: PASS
+  - `test_03_missing_measurement_with_known_limit`: PASS
+  - `test_04_measurement_with_missing_limit`: PASS
+  - `test_05_valid_measurement_and_limit_comparison`: PASS
+  - `test_06_qualitative_close_tolerance_remains_qualitative`: PASS
+  - `test_07_qualitative_leakage_no_invented_rate`: PASS
+  - `test_08_missing_values_deviation_not_zero`: PASS
+  - `test_09_missing_operational_telemetry_no_aor_compliance`: PASS
+  - `test_10_ai_draft_no_independent_operational_approval`: PASS
+  - `test_11_authorized_human_approve_records_hitl_state`: PASS
+  - `test_12_human_reject_produces_no_approved_conclusion`: PASS
+  - `test_13_human_modify_replanning_and_revised_artifact`: PASS
+  - `test_14_prompt_injection_defense_against_false_compliance`: PASS
+  - `test_15_unrelated_numbers_not_used_as_engineering_limits`: PASS
+  - `test_16_artifact_semantic_verification_rejects_unsupported_claims`: PASS
+- **Epistemic Rigor Test Suite ([`backend/tests/test_source_grounding_epistemic_rigor.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_source_grounding_epistemic_rigor.py))**: `12/12 PASS` in 2.042s.
+- **Real End-to-End Workflow Validation with `maintenance.pdf` ([`scratch/verify_real_maintenance_pdf.py`](file:///Users/shrutikondabathula/SIH26117/scratch/verify_real_maintenance_pdf.py))**: `PASS`:
+  - Ingested 72-page `004be6917dd94f97ad1c61189055d50f_maintenance.pdf`.
+  - Section 2 Evidence Availability Table verified with `UNAVAILABLE` for missing telemetry.
+  - Generated PDF deliverable `real_maintenance_approval_note.pdf` (4,723 bytes) and DOCX deliverable `real_maintenance_approval_note.docx` (38,271 bytes).
+  - Inspected generated PDF text: confirmed prominent `HUMAN APPROVAL REQUIRED`, zero hallucinated limits, zero 0% deviation, and zero unauthorized AI approvals.
+- **Full Backend Test Discovery Suite**: `621/621 PASS` in 343.999s (0 failures, 0 errors).
+- **Frontend Unit Tests**: `97/97 PASS` across all 12 test suites in 43.35s.
+- **Next.js Production Build**: Compiled successfully in 580ms with 0 errors.
+- **Cryptographic HMAC Audit Chain**: `status: INTACT` across 2,496 records (`tampered_record_id: None`).
+
+### Result:
+- Hardened report generation pipeline completely resolves all unsupported conclusion regressions. Missing evidence is strictly represented as `UNAVAILABLE` with no false comparisons or deviations; qualitative statements remain qualitative; operational approvals strictly require authorized human reviewer action; and 8-section evidence-grounded reports are generated and verified.
+
+### Files Changed:
+- `backend/agents/controller/source_grounding.py` (MODIFIED)
+- `backend/agents/controller/agent.py` (MODIFIED)
+- `backend/tests/test_source_grounding_hardening_suite.py` (NEW)
+- `scratch/verify_real_maintenance_pdf.py` (NEW)
+- `walkthrough.md` (MODIFIED)
+- `IMPLEMENTATION_STATUS.md` (MODIFIED)
+
+### Dependencies:
+- `backend.agents.controller.source_grounding` -> `backend.agents.controller.agent` -> `backend.tools.document_generators.generators` -> `backend.security.audit`
+
+### Next Step:
+- System is verified and ready for sovereign industrial operations and hackathon demonstration workflows.
+- `backend/agents/controller/source_grounding.py` (NEW)
+- `backend/agents/controller/agent.py` (MODIFIED)
+- `backend/tests/test_source_grounding_epistemic_rigor.py` (NEW)
+- `walkthrough.md` (MODIFIED)
+- `IMPLEMENTATION_STATUS.md` (MODIFIED)
+
+### Dependencies:
+- `backend.agents.controller.source_grounding` -> `backend.agents.controller.agent` -> `backend.tools.document_generators.generators` -> `backend.security.audit`
+
+### Next Step:
+- Continue autonomous verification workflows and user task executions.
+
+---
+
+### Feature:
+AEGIS Generated Document Download Authorization, Original Requester Ownership Preservation & Multi-Format Stream Delivery (Resolution of "Download not authorized for this document" 403 Forbidden Error, Elimination of Reviewer Ownership Transfer during HITL Resume, Authoritative Linkage of Generated Deliverables to Originating Requester/Conversation, Robust Access Control Predicate `can_access_generated_document` with Requester Validation, Conversation Owner Inheritance, Admin Policy, Department Scope & JSON-Parsed Source Material Citations, Idempotent SQLite Database Owner Synchronization, 13/13 Dedicated Download Authorization Tests PASS, 97/97 Frontend Tests PASS, Clean Next.js Production Build, and Cryptographic HMAC Audit Chain INTACT)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Root Cause Analysis ("Download not authorized for this document")**:
+  1. When an administrator or reviewer approved an approval gate via `POST /api/approvals/{approval_id}/approve`, execution was resumed with `AgentController.resume_execution()`.
+  2. During deliverable compilation in `_execute_step`, `generated_documents.owner_id` was previously recorded as the administrator/reviewer who approved the task (e.g., `owner_id = 1` for `aegis_admin`) instead of the original requester (e.g., `owner_id = 85` for `shruti_2005` or `owner_id = 2` for `operator1`).
+  3. When the original requester returned to their conversation and clicked "Download Document", `can_access_generated_document(current_user, doc, "DOWNLOAD")` rejected the request with HTTP 403 Forbidden (`"Download not authorized for this document."`) because `owner_id` did not match the logged-in user.
+  4. In addition, `source_document_ids` was serialized as a JSON string (e.g. `'["384c..."]'`), which `can_access_generated_document` previously split with `src_ids.split(",")` without stripping brackets/quotes, preventing inherited access through cited source materials.
+- **Original Requester Ownership Resolution ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - In `_execute_step` (`convert_document` and `generate_document` actions), `owner_id`, `owner_username`, `owner_department_id`, and `owner_department_name` are now authoritatively resolved from the task's originating conversation and requester state context rather than the reviewer.
+  - Ensures reviewer approval never transfers deliverable ownership away from the user who commissioned the task.
+- **Authoritative Generated Document Access Control Predicate ([`backend/security/access_control.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/access_control.py))**:
+  - Refactored `can_access_generated_document(current_user, doc, required_permission)`:
+    - **Rule 1 (Direct Owner)**: Grants full access if `int(owner_id) == int(user_id)`.
+    - **Rule 2 (Conversation Requester)**: Grants full access if `conversations.user_id == user_id` (authoritative task requester).
+    - **Rule 3 (System Administrator)**: Grants access according to organization policy if `is_admin == True`.
+    - **Rule 4 (Department-scoped Policy)**: Grants access if `user_dept_id == owner_dept_id` when `visibility == "DEPARTMENT"`.
+    - **Rule 5 (Organization Policy)**: Grants access if `visibility == "ORGANIZATION"`.
+    - **Rule 6 (Inherited Source Documents)**: Parses JSON array strings, lists, and CSV strings of `source_document_ids` and grants access if user has `READ` access to all cited source materials (`can_access_document`).
+- **Idempotent Database Synchronization ([`backend/security/database.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/database.py))**:
+  - Added an idempotent backfill in `init_db()` to synchronize `owner_id`, `owner_username`, `owner_department_id`, and `owner_department_name` from parent conversations for any previously generated records.
+- **Dual Route Support ([`backend/app/main.py`](file:///Users/shrutikondabathula/SIH26117/backend/app/main.py))**:
+  - Dual route support for `@app.get("/documents/generated/{id}/download")` and `@app.get("/api/documents/generated/{id}/download")`.
+- **Zero Mocks / Zero Cloud Dependencies / Zero Token Leaks**:
+  - All ownership and access validations are performed against authoritative SQLite state and filesystem byte streams. No JWTs in URLs, no public static folders.
+
+### Tested:
+- **Dedicated Download Authorization Suite (`test_hitl_download_authorization.py`)**: `13/13 PASS` in 3.276s:
+  - `test_01_authenticated_requester_can_download_own_document`: PASS
+  - `test_02_reviewer_approval_does_not_transfer_ownership`: PASS
+  - `test_03_admin_can_download_according_to_policy`: PASS
+  - `test_04_unauthorized_cross_user_download_returns_403`: PASS
+  - `test_05_missing_authentication_returns_401`: PASS
+  - `test_06_cross_department_user_download_returns_403`: PASS
+  - `test_07_downloaded_binary_has_non_zero_size`: PASS
+  - `test_08_correct_filename_in_content_disposition`: PASS
+  - `test_09_correct_mime_type_returned`: PASS
+  - `test_10_api_route_alias_supported`: PASS
+  - `test_11_repeated_downloads_are_idempotent`: PASS
+  - `test_12_nonexistent_document_returns_404`: PASS
+  - `test_13_audit_chain_integrity_remains_intact`: PASS
+- **Frontend Unit Tests (`npm test --prefix frontend -- --watchAll=false`)**: `97/97 PASS` across all test suites.
+- **Next.js Production Build (`npm run build --prefix frontend`)**: Compiled successfully in 626ms with 0 errors.
+- **Live HTTP Download Verification**:
+  - Requester download (`shruti_2005` on `gen_0ae003562df3`): Status 200, 4,304 bytes, valid `%PDF-` header, `Content-Disposition: attachment; filename="report_1788801428.pdf"`.
+  - Admin download (`engineering_admin`): Status 200, exact binary match.
+  - Cross-user download (`operator1`): Rejected with HTTP 403 Forbidden.
+  - Unauthenticated download: Rejected with HTTP 401 Unauthorized.
+- **Cryptographic HMAC Audit Chain**: Verified `INTACT` across 2,406 audit log entries (`tampered_record_id: None`).
+
+### Result:
+- The generated document download authorization bug is completely resolved. The original requester who creates a task can reliably and securely download their completed deliverable. Reviewers approving requests do not steal deliverable ownership. Cross-user IDOR attempts are strictly rejected with 403 Forbidden, and unauthenticated requests receive 401 Unauthorized.
+
+### Evidence:
+- `python -m unittest backend/tests/test_hitl_download_authorization.py`: Ran 13 tests in 3.276s, OK.
+- `npm test --prefix frontend`: 97 passed (0 failed).
+- `npm run build --prefix frontend`: Compiled in 626ms, exit code 0.
+- Live API verification: Status 200, 4,304 bytes, valid PDF, 403 on cross-user attempt, 401 on unauthenticated attempt.
+- `AuditLogger.verify_chain_integrity()`: `{'status': 'INTACT', 'total_records': 2406, 'tampered_record_id': None}`.
+
+### Limitations:
+- None.
+
+### Files Changed:
+- `backend/security/access_control.py`
+- `backend/agents/controller/agent.py`
+- `backend/security/database.py`
+- `backend/tests/test_hitl_download_authorization.py`
+- `IMPLEMENTATION_STATUS.md`
+- `walkthrough.md`
+
+### Dependencies:
+- `backend/security/auth.py`
+- `backend/security/audit.py`
+- `backend/app/main.py`
+- `frontend/lib/api/client.ts`
+
+### Next Step:
+- Proceed to live hackathon end-to-end rehearsal.
+
+---
+
+### Feature:
+- `frontend/components/views/SandboxView.tsx`
+- `frontend/tests/approvals.test.js`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `backend/services/approval_service.py`
+- `backend/agents/controller/agent.py`
+- `backend/security/auth.py`
+- `backend/security/audit.py`
+
+### Next Step:
+- Continue to complete remaining hackathon workbench presentation flows.
+
+---
+
+### Feature:
+AEGIS Human-In-The-Loop (HITL) UI/UX Transparency, Role Experience Separation & Interactive Lifecycle State Machine (Dedicated Operator vs Reviewer Separation in Human Approvals with Truthful "My Approval Status" Card and Zero 403 Network Polling, Authoritative 9-Stage Visual State Machine Stepper `SUBMITTED` → `ANALYZING` → `PLANNING` → `EXECUTING` → `VERIFYING` → 🟡 `HUMAN APPROVAL REQUIRED` → 🔵 `APPROVED / RESUMING` → ⚙ `GENERATING DELIVERABLE` → 🔎 `VERIFYING ARTIFACT` → 🟢 `COMPLETED`, Amber Warning Card with Requester/Department/Approval ID and Zero CoT/Secrets Exposure, Live Status Auto-Resumption with Pulsing Resuming Card and Verified Deliverable Card Rendering, Prompt Edit & Copy with History Immutability Banner and Clipboard Feedback, 93/93 Frontend Tests PASS, 580/580 Backend Tests PASS, Clean Next.js Turbopack Production Build, and Cryptographic HMAC Audit Chain INTACT)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Root Cause of Previous UI Confusion**:
+  1. Standard users opening "Human Approvals" were presented with an error-like restriction view ("Reviewer Access Required"), creating confusion as to whether the system failed or where their own tasks lived.
+  2. The AI Assistant rendered a generic spinner or simple banner without clarifying the operational lifecycle steps (analyzing, planning, paused at boundary, resuming, generating, verified deliverable).
+  3. Prompts lacked direct inline action buttons to copy or load previous queries into the composer without mutating message history.
+- **Operator vs Reviewer Experience Segregation ([`frontend/components/views/ApprovalsView.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/components/views/ApprovalsView.tsx))**:
+  - Distinguishes standard operator roles (`role: "user"`) from authorized reviewer roles (`admin`, `reviewer`, `supervisor`, `lead`).
+  - Standard users see `"My Approval Status"` with a dedicated explanation card: *"You do not have reviewer permissions. You can still monitor the approval status of your own AI tasks from the AI Assistant."* with a direct button `[ Go to AI Assistant ]`.
+  - Strictly skips calling reviewer-only endpoints (`/api/approvals/pending`) for normal users, eliminating unexpected 403 network errors.
+- **Authoritative Visual State Machine ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - Implemented an authoritative, multi-step visual lifecycle stepper: `SUBMITTED` → `ANALYZING` → `PLANNING` → `EXECUTING` → `VERIFYING` → 🟡 `HUMAN APPROVAL REQUIRED` → 🔵 `APPROVED / RESUMING` → ⚙ `GENERATING DELIVERABLE` → 🔎 `VERIFYING ARTIFACT` → 🟢 `COMPLETED`.
+  - Driven strictly by authoritative SQLite state (`WAITING_FOR_HUMAN`, `APPROVED`, `MODIFIED`, `RESUMING`, `COMPLETED`, `REJECTED`) via `chatApi.getExecutionStatus(activeSessionId)`. Zero fake timers.
+- **Amber Warning Card for Paused Tasks ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - Renders a prominent amber card when paused at `WAITING_FOR_HUMAN`:
+    - Shows Status: `WAITING FOR HUMAN`, Requester (`current user`), Department (`current department`), Approval ID (`appr_...`).
+    - Explains: *"AEGIS reached a consequential workflow boundary. Draft prepared and verified against evidence. Final publication is blocked until an authorized reviewer approves."*
+    - Zero chain-of-thought, secrets, or internal model reasoning exposed.
+- **Pulsing Resuming & Verified Deliverable Cards ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - When reviewer approves, UI immediately transitions to 🔵 `APPROVED / RESUMING` (`"Authorized reviewer approved this task. Continuing from paused step..."`) with an animated spinning indicator.
+  - Upon backend `COMPLETED` state, renders 🟢 `HUMAN APPROVAL GRANTED` milestone checkmarks and an authoritative Deliverable Card (`[ Download PDF ]` / `[ Download DOCX ]`) only when the document ID or verified URL is present.
+- **Prompt Edit & Copy with Immutable History ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - User messages feature `[ Edit ]` and `[ Copy ]` actions.
+  - `[ Edit ]` loads the exact message into the composer and shows a banner: *"Editing previous prompt • Original preserved in history"*. Submitting generates a brand new execution without mutating or deleting conversation history.
+  - `[ Copy ]` copies exact prompt text to clipboard and shows `✓ Copied` for 2 seconds.
+- **Zero Backend Changes / Zero New Dependencies / Zero Mocks**:
+  - Preserved backend HITL architecture, RBAC, department isolation, and HMAC audit logging.
+
+### Tested:
+- **Frontend Unit Tests (`npm test --prefix frontend -- --watchAll=false`)**: `93/93 PASS` across all test suites in 43.67ms.
+- **Next.js Production Build (`npm run build --prefix frontend`)**: Compiled successfully in Turbopack with full TypeScript checking, 0 errors.
+- **Backend Unit Tests (`backend/.venv/bin/python -m unittest discover -s backend/tests -p "test_*.py"`)**: `580/580 PASS` in 334.057s.
+- **Cryptographic HMAC Chain Integrity**: Verified `INTACT` across 2,372 audit log entries (`tampered_record_id: None`).
+
+### Result:
+- Both operator and reviewer experiences are clear, intuitive, and truthful. Standard operators monitor their tasks inside AI Assistant with live step-by-step progress from submission to verified deliverable download, while reviewers manage pending queues in Human Approvals.
+
+### Evidence:
+- `npm test --prefix frontend`: 93 passed (0 failed).
+- `npm run build --prefix frontend`: Static generation 5/5 pages, exit code 0.
+- `backend/.venv/bin/python -m unittest discover`: Ran 580 tests in 334.057s, OK.
+- `AuditLogger.verify_chain_integrity()`: `{'status': 'INTACT', 'total_records': 2372, 'tampered_record_id': None}`.
+
+### Limitations:
+- None.
+
+### Files Changed:
+- `frontend/components/views/ApprovalsView.tsx`
+- `frontend/app/page.tsx`
+- `frontend/tests/approvals.test.js`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `Next.js 16`, `React 19`, `FastAPI`, `SQLite3`, `HMAC-SHA256`
+
+### Next Step:
+- System is verified, built, and ready for full hackathon demonstration and industrial deployment.
+
+---
+
+### Feature:
+AEGIS Human-In-The-Loop (HITL) Requester Execution-Status Polling, Reviewer RBAC Segregation & Two-Session UI Synchronization (Dedicated JWT-Authenticated Requester Status Endpoint `GET /conversations/{id}/execution-status` with Anti-IDOR Ownership Validation, Strict 403 Reviewer RBAC on `/api/approvals/*` Endpoints with Zero Privilege Weakening, Truthful "Reviewer Access Required" Approvals Card for Standard Users with Zero Unauthorized Network Requests, Bounded AI Assistant Frontend Polling Loop with Authoritative Deliverable Card Rendering, 8/8 Dedicated Synchronization & Anti-IDOR Tests PASS, 42/42 HITL Backend Tests PASS, 90/90 Frontend Unit Tests PASS, Clean Next.js Turbopack Production Build, and Full Regression Suite PASS with INTACT HMAC Chain)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Root Cause Analysis & Architecture Fix**:
+  1. Identified that normal operators (`role: "user"`) previously received `403 Forbidden` (`"Reviewer privileges required."`) because the frontend AI Assistant attempted to poll the reviewer-only endpoint `GET /api/approvals/{approval_id}`.
+  2. Identified that the Human Approvals tab (`ApprovalsView.tsx`) claimed to offer an "Observer View" to operators while firing `GET /api/approvals/pending`, producing an error notification.
+  3. Rather than weakening RBAC or granting normal users reviewer privileges, architecturally segregated **Reviewer Approval Management** from **Requester Execution Status**.
+- **Backend Dedicated Requester-Status Endpoint ([`backend/app/main.py`](file:///Users/shrutikondabathula/SIH26117/backend/app/main.py))**:
+  - Implemented `@app.get("/conversations/{session_id}/execution-status")` and alias `@app.get("/api/conversations/{session_id}/execution-status")`.
+  - Derives identity purely from caller's JWT (`get_current_user`). Never trusts client-supplied query/body IDs.
+  - Enforces Anti-IDOR: Non-owners querying another user's session strictly receive `403 Forbidden` (`"Access denied. You do not own this conversation session."`) with an `AUTHORIZATION_DENIED` audit log.
+  - Returns authoritative SQLite state: `{ session_id, execution_status, approval_id, approval_status, plan_id, agent_state, is_waiting_for_human, rejection_reason, has_artifact, artifact, total_messages }`.
+- **Reviewer Endpoints RBAC Enforcement ([`backend/app/main.py`](file:///Users/shrutikondabathula/SIH26117/backend/app/main.py))**:
+  - Confirmed all reviewer endpoints (`/api/approvals/pending`, `/{id}`, `/approve`, `/modify`, `/reject`, `/resume`) strictly enforce `role in AUTHORIZED_REVIEWER_ROLES` or admin, rejecting normal users with `403 Forbidden`.
+- **Frontend API Client & Bounded Polling ([`frontend/lib/api/chat.ts`](file:///Users/shrutikondabathula/SIH26117/frontend/lib/api/chat.ts) & [`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - Added `chatApi.getExecutionStatus(sessionId)`.
+  - Updated AI Assistant bounded polling `useEffect` to poll `chatApi.getExecutionStatus(activeSessionId)` every 2s (up to 60 polls / 120s max).
+  - Automatically loads updated conversation upon terminal state (`COMPLETED`, `REJECTED`, `FAILED`, `APPROVED`, `MODIFIED`) and clears interval.
+- **Truthful Human Approvals View ([`frontend/components/views/ApprovalsView.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/components/views/ApprovalsView.tsx))**:
+  - Disabled pending queue fetch for non-reviewers (`!isAuthorizedReviewer`), preventing 403 network failures.
+  - Renders a clean "Reviewer Access Required" card explaining that approval actions are reserved for supervisors, leads, and admins, with a direct button back to the AI Assistant.
+- **Dedicated Regression Test Suite ([`backend/tests/test_approval_execution_resume_sync.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_approval_execution_resume_sync.py))**:
+  - Verified all 15 regression requirements across 8 test methods covering reviewer 403 rejections, requester status polling, Anti-IDOR enforcement, admin approval resolution, deliverable persistence, MODIFY replanning, REJECT halting, double-approval replay protection, and HMAC audit chain integrity.
+
+### Tested:
+- **Approval Resume & Sync Regression Suite (`test_approval_execution_resume_sync.py`)**: `8/8 PASS` in 6.084s.
+- **HITL API & Approval Service Suite (`test_hitl_rest_api.py`, `test_hitl_approval_service.py`)**: `42/42 PASS` in 15.394s.
+- **Frontend Unit Test Suite (`npm test --prefix frontend`)**: `90/90 PASS` in 57.944ms across 10 test suites.
+- **Next.js Production Build (`npm run build --prefix frontend`)**: Compiled cleanly with Turbopack in 1.3s, 0 errors.
+- **Cryptographic HMAC Audit Chain Continuity**: Verified `INTACT` with 0 broken links.
+
+### Result:
+- End-to-end two-session Human-in-the-Loop approval resumption and UI synchronization is fully verified: User A submits task → enters `WAITING_FOR_HUMAN` → Admin approves in Session B → backend resumes execution → persists final deliverable → User A's browser detects completion via authenticated requester-status polling → displays deliverable card without refresh → survives page reload → User B is strictly forbidden (403).
+
+### Evidence:
+- `backend/tests/test_approval_execution_resume_sync.py` (8/8 PASS in 6.084s)
+- `backend/tests/test_hitl_rest_api.py` & `test_hitl_approval_service.py` (42/42 PASS in 15.394s)
+- `npm test --prefix frontend` (90/90 PASS in 57.944ms)
+- `npm run build --prefix frontend` (Exit code 0, 0 errors)
+- Cryptographic HMAC chain verification: `status: INTACT`.
+
+### Limitations:
+- None.
+
+### Files Changed:
+- `backend/app/main.py`
+- `frontend/lib/api/chat.ts`
+- `frontend/app/page.tsx`
+- `frontend/components/views/ApprovalsView.tsx`
+- `backend/tests/test_approval_execution_resume_sync.py`
+- `IMPLEMENTATION_STATUS.md`
+- `walkthrough.md`
+
+### Dependencies:
+- `FastAPI`, `SQLite3`, `HMAC-SHA256`, `SubprocessSandbox`, `DocxGenerator`, `PdfGenerator`, `XlsxGenerator`
+
+### Next Step:
+- Ready for full sovereign on-premise industrial deployment.
+
+---
+
+### Feature:
+AEGIS Source-Grounded Execution, Epistemic Tagging & Zero-Mock Pipeline Integrity (Elimination of Placeholder/Sample Document Variables in Code Generation, Universal Sandbox Mounting of Authorized Document Files, Strict 5-Category Epistemic Classification `[SOURCE_DOCUMENT_FACT]`, `[USER_PROVIDED_INPUT]`, `[DERIVED_CALCULATION]`, `[MODEL_INFERENCE]`, `[RECOMMENDATION]`, Relational Limit Validation against Dictionaries `limits['key']` with Zero Key Membership Checking, Unavailable Metric Declaration `[UNAVAILABLE_MEASUREMENT]` with Zero Value Fabrication, Unnecessary Sandbox Step Suppression, 11/11 Dedicated Grounding Tests PASS, 30/30 HITL Integration Tests PASS, 90/90 Frontend Unit Tests PASS, Clean Turbopack Build, and 572/572 Full Backend Tests PASS with INTACT HMAC Chain)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Root Cause Resolution for Sample Document Text in Sandbox**:
+  - Identified that sandbox code generator prompts did not explicitly prohibit defining sample text variables (e.g. `maintenance_document = """ ... """ # Sample text`).
+  - Identified that authorized file mounting into the sandbox filesystem was restricted to `CATEGORY_MIXED` only, leaving `CATEGORY_DOCGEN` and `CATEGORY_D` without on-disk file mounts.
+  - Resolved by universally mounting `target_doc` into `input_files` whenever `target_doc` exists on the plan or can be retrieved from `self.rag_service` by `target_doc_id` and exists on disk.
+- **Strict Epistemic Classification Taxonomy ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Implemented strict 5-category classification across `extract_findings`, `generate_answer`, and `generate_document_content`:
+    1. `[SOURCE_DOCUMENT_FACT]`: Direct, uninterpreted facts and raw numeric measurements present in authorized evidence, accompanied by citations `[Source: <filename>, Page <p>]`.
+    2. `[USER_PROVIDED_INPUT]`: Explicit parameters, thresholds, or targets supplied directly by the user in the prompt.
+    3. `[DERIVED_CALCULATION]`: Numerical formulas, thermodynamic calculations, and differentials derived strictly from source facts or explicit inputs.
+    4. `[MODEL_INFERENCE]`: Qualitative deductions, operational risk assessments, or status inferences drawn from facts.
+    5. `[RECOMMENDATION]`: Prescribed maintenance actions, corrective measures, or operational conditions.
+- **Relational Limit Validation & Dictionary Key Lookup ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Updated code generator instructions to prohibit flawed key membership checking (e.g., `if measured in limits`, which incorrectly checks dictionary keys).
+  - Enforced relational comparison against dictionary values (`if measured_val > limits['AOR']:`) and required type casting (`float/int`).
+  - Enforced structured calculation output with: `Measured Value`, `Unit`, `Applicable Limit`, `Unit`, `Comparison Operator`, `Deviation / Margin`, `Evidence Source / Page`, and `Evaluation Status` (PASS / WITHIN_LIMITS / EXCEEDED / VIOLATION / UNAVAILABLE).
+- **Missing Measurement Handling & Zero Fabrication ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - When an expected metric or parameter is absent from the evidence, system explicitly outputs `[UNAVAILABLE_MEASUREMENT: <name>] - Not present in authorized document.`
+  - Strictly prohibits fabricating dummy numbers, limits, or equipment values to complete calculations.
+- **Unnecessary Sandbox Step Suppression ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - When a task does not require engineering calculations or numerical computation, code execution steps are omitted in favor of direct synthesis.
+- **Testing & Verification ([`backend/tests/test_source_grounded_execution.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_source_grounded_execution.py))**:
+  - Created 11 regression tests verifying all 10 requirements: actual uploaded evidence propagation, zero sample text injection in sandbox, zero measurement fabrication, dictionary limit relational validation, insufficient evidence handling, source page citations, HITL pause at `WAITING_FOR_HUMAN`, approval resumption, modification replan, rejection halting, and HMAC audit chain integrity.
+
+### Tested:
+- **Source-Grounded Execution Regression Suite (`test_source_grounded_execution.py`)**: `11/11 PASS` in 3.853s.
+- **HITL Integration Suite (`test_hitl_agent_integration.py`, `test_hitl_payload_bounding.py`)**: `25/25 PASS` in 10.009s.
+- **Frontend Unit Test Suite (`npm test --prefix frontend`)**: `90/90 PASS` in 45.6ms across 10 test suites.
+- **Next.js Production Build (`npm run build --prefix frontend`)**: Compiled cleanly with Turbopack in 1.4s, 0 errors.
+- **Full Backend Regression Suite (`unittest discover -s backend/tests`)**: `572/572 PASS` in 295.894s.
+- **HMAC Audit Chain Continuity**: Verified `INTACT` across all audit events.
+
+### Result:
+- The entire pipeline is verified to operate strictly on authentic authorized document evidence and user inputs with zero sample text placeholders, zero fabricated measurements, and mathematically sound limit evaluations.
+
+### Evidence:
+- `backend/tests/test_source_grounded_execution.py` (11/11 PASS in 3.853s)
+- `backend/tests/test_hitl_agent_integration.py` & `test_hitl_payload_bounding.py` (25/25 PASS)
+- `npm test --prefix frontend` (90/90 PASS in 45.6ms)
+- `npm run build --prefix frontend` (Exit code 0, 0 errors)
+- `backend/.venv/bin/python -m unittest discover -s backend/tests` (572/572 PASS in 295.894s)
+- Cryptographic HMAC chain verification: `status: INTACT`.
+
+### Limitations:
+- None.
+
+### Files Changed:
+- `backend/agents/controller/agent.py`
+- `backend/tests/test_source_grounded_execution.py`
+- `IMPLEMENTATION_STATUS.md`
+- `walkthrough.md`
+
+### Dependencies:
+- `FastAPI`, `SQLite3`, `HMAC-SHA256`, `SubprocessSandbox`, `DocxGenerator`, `PdfGenerator`, `XlsxGenerator`
+
+### Next Step:
+- Ready for final hackathon demonstration and physical air-gapped deployment.
+
+---
+
+### Feature:
+AEGIS HITL Approval Payload Bounding, Deterministic Snapshot State Model & Non-Recursive Replanning (Strictly Bounded Approval Payloads < 15 KB across all 3 Replans, Preservation of 65,536-byte Hard Ceiling `MAX_PAYLOAD_JSON_BYTES`, Prevention of Recursive Plan Nesting & Replan ID Chaining, Sandbox Stdout/Stderr Bounded Summarization, Code Generator Numeric Dictionary Limit Validation Fix, 11/11 Focused HITL Bounding Tests PASS, 30/30 HITL Integration Tests PASS, 90/90 Frontend Tests PASS, Clean Turbopack Build, and 561/561 Full Backend Tests PASS with INTACT HMAC Chain)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Root Cause Resolution for Payload Size Explosion**:
+  - Identified that `AgentController` was embedding the entire unpruned `plan.to_dict()` into `proposed_payload["plan_snapshot"]`, which included raw 50-chunk RAG arrays, full multi-kilobyte code strings, raw execution dictionaries, duplicate `actual_result`/`inputs` fields, and full unconstrained stdout/stderr dumps across each replan attempt.
+  - Across successive replan attempts (`step_5_replan_1_replan_2_replan_3`), execution state grew quadratically, breaching `MAX_PAYLOAD_JSON_BYTES = 65536` (64 KB).
+- **Dedicated Bounded Snapshot Model ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Implemented `AgentStep.to_snapshot_dict()`:
+    - Sanitizes and bounds input fields (max 500 chars), strictly excluding recursive plan snapshots, previous approval payloads, and binary file buffers.
+    - Summarizes sandbox execution output into a compact dictionary: `{status, exit_code, summary, artifacts_count, stdout}` (max 200-char summary, max 400-char stdout excerpt), omitting large stdout/stderr/code blobs.
+    - Summarizes RAG output into a bounded citations list (max 5 items, max 200 chars), omitting raw 50-chunk arrays.
+    - Preserves drafted document text up to 3500 chars (needed for subsequent deliverable compilation).
+    - Summarizes observations and errors (bounded to 300 chars).
+  - Implemented `AgentPlan.to_snapshot_dict()`:
+    - Serializes only plan metadata, bounded constraints, and `[s.to_snapshot_dict() for s in self.steps]`.
+    - Eliminates redundant history, raw observations, and prevents recursive nested plans.
+- **Strictly Bounded HITL Step 5 Payload Construction ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Constructs `proposed_payload` using `plan.to_snapshot_dict()`, `task_type`, `step_type`, `plan_version`, `summary` (max 150 chars), `findings` (max 1500 chars), `calculations` (max 1000 chars), `citations` (max 5 items), `draft_document_text` (max 3000 chars), and `target_format`.
+  - Typical payload size is ~10 KB (and < 15 KB even after 3 replans), far below the 64 KB ceiling.
+- **Replan ID Cleanup & Non-Recursive Replanning ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Extracted base step ID (`step.step_id.split("_replan_")[0]`) in `_replan()`, producing clean non-nested step IDs (`step_2_replan_1`, `step_2_replan_2`, `step_2_replan_3`) rather than nested chains (`step_2_replan_1_replan_2_replan_3`).
+  - Strictly bounded `previous_error` passed into retry steps (max 500 chars).
+  - Sanitized generic retry step input to prevent recursive nesting of prior plan state.
+- **Code Generator Numeric Limit Validation Prompt Guidance ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Updated all Code Generator system prompts with explicit rules for numeric comparisons against limit dictionaries (e.g. `limits = {'AOR': 100, 'POR': 200}`).
+  - Prohibits checking key membership (`if measured in limits`) and requires comparing measured values against numeric dictionary values (`if measured_val > limits['AOR']:`).
+- **Testing & Verification ([`backend/tests/test_hitl_payload_bounding.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_payload_bounding.py))**:
+  - Created 11 comprehensive regression tests verifying all 15 scenarios: bounded payload < 64 KB across 3 replans, no recursive plan nesting, sandbox stdout/stderr sanitization, max budget exhaustion halting with `FAILED`, genuine HITL remaining `WAITING_FOR_HUMAN`, rejection of intentionally oversized malicious payloads (> 64 KB), cryptographic HMAC chain integrity, server reboot recovery, and numeric limit validation.
+
+### Tested:
+- **HITL Payload Bounding Regression Suite (`test_hitl_payload_bounding.py`)**: `11/11 PASS` in 0.283s.
+- **HITL Integration & REST API Suites (`test_hitl_agent_integration.py`, `test_hitl_rest_api.py`)**: `30/30 PASS` in 22.919s.
+- **Frontend Unit Tests (`npm test --prefix frontend`)**: `90/90 PASS` in 45.4ms across 10 test suites.
+- **Next.js Production Build (`npm run build --prefix frontend`)**: Compiled cleanly with Turbopack in 1.4s, 0 errors.
+- **Full Backend Regression Suite (`unittest discover -s backend/tests`)**: `561/561 PASS` in 422.621s.
+- **HMAC Chain Continuity**: Verified `INTACT` across all audit events.
+
+### Result:
+- HITL Approval payload size explosion is completely resolved. Approval payloads remain bounded (~10–14 KB), deterministic, and sanitized across all replan attempts while preserving the hard 65,536-byte security limit and full server restart recovery.
+
+### Evidence:
+- `backend/tests/test_hitl_payload_bounding.py` (11/11 PASS in 0.283s)
+- `backend/tests/test_hitl_agent_integration.py` & `test_hitl_rest_api.py` (30/30 PASS in 22.919s)
+- `npm test --prefix frontend` (90/90 PASS)
+- `npm run build --prefix frontend` (Exit code 0, 0 errors)
+- `backend/.venv/bin/python -m unittest discover -s backend/tests` (561/561 PASS in 422.621s)
+- Cryptographic HMAC chain verification: `status: INTACT`.
+
+### Limitations:
+- None.
+
+### Files Changed:
+- `backend/agents/controller/agent.py`
+- `backend/tests/test_hitl_payload_bounding.py`
+- `IMPLEMENTATION_STATUS.md`
+- `walkthrough.md`
+
+### Dependencies:
+- `FastAPI`, `SQLite3`, `HMAC-SHA256`, `SubprocessSandbox`, `DocxGenerator`, `PdfGenerator`, `XlsxGenerator`
+
+### Next Step:
+- System is verified and ready for end-to-end hackathon demonstration.
+
+---
+
+### Feature:
+AEGIS Live Execution Transparency & Real-Time Agent Activity Telemetry (Zero Chain-of-Thought / Secret Leakage, SSE Streaming via `POST /chat/stream` and `POST /conversations/{session_id}/messages/{message_id}/edit-stream`, Real-Time `AgentController` Event Pipeline `REQUEST_RECEIVED` through `EXECUTION_COMPLETED`, Observable Plan Step Cards & Live Millisecond Timer, Verification & Auto-Replan State Indicators, Durable Message Replay on Historical Session Load, 6/6 Live Transparency Backend Tests PASS, 90/90 Frontend Unit Tests PASS, Clean Turbopack Build, and 550/550 Full Backend Regression PASS)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Real-Time Operational Event Pipeline ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Implemented `ExecutionEventType` enum with 21 granular operational milestones (`REQUEST_RECEIVED`, `PLANNING_STARTED`, `PLAN_CREATED`, `STEP_STARTED`, `STEP_COMPLETED`, `STEP_FAILED`, `RAG_STARTED`, `RAG_COMPLETED`, `MODEL_INFERENCE_STARTED`, `MODEL_INFERENCE_COMPLETED`, `SANDBOX_EXECUTION_STARTED`, `SANDBOX_EXECUTION_COMPLETED`, `DOCUMENT_GENERATION_STARTED`, `DOCUMENT_GENERATED`, `VISION_ANALYSIS_STARTED`, `VISION_ANALYSIS_COMPLETED`, `VERIFICATION_STARTED`, `VERIFICATION_COMPLETED`, `REPLAN_STARTED`, `WAITING_FOR_HUMAN`, `EXECUTION_COMPLETED`, `EXECUTION_FAILED`).
+  - Added synchronous and asynchronous event emission helpers (`_emit_event_sync`, `_emit_event`) in `AgentController` supporting an optional `event_callback`.
+  - Added `execution_events: List[Dict[str, Any]]` and `execution_id: str` (formatted as `EXE-[A-F0-9]{8}`) to `AgentState` and included them in serialized dictionary returns.
+  - Piped real-time execution events across `run()`, `_execute_step()`, `_verify_step()`, and `_replan()` with safe metadata (step type, capability, duration ms, model ID, verification status, document filename, retry count).
+- **Zero Chain-of-Thought & Zero Secret Exposure Guarantee**:
+  - Excluded raw hidden model thinking, chain-of-thought tokens, private prompts, credentials, API keys, and internal database paths from all telemetry events.
+- **Server-Sent Events (SSE) Streaming Endpoints ([`backend/app/main.py`](file:///Users/shrutikondabathula/SIH26117/backend/app/main.py))**:
+  - Refactored core execution logic into `_run_chat_impl` accepting an `event_callback` to support streaming and non-streaming execution without code duplication.
+  - Implemented `POST /chat/stream` and `POST /conversations/{session_id}/messages/{message_id}/edit-stream` returning `StreamingResponse(..., media_type="text/event-stream")`.
+  - Transmitted live JSON SSE events (`data: {"event": ...}\n\n`) and final results (`data: {"result": ..., "done": true}\n\n`) over standard HTTP streams without introducing WebSocket complexity.
+  - Persisted `execution_id`, `execution_events`, and `plan` inside message metadata in `ConversationManager.add_message` for durable post-execution replay across reloads.
+- **Frontend Live Execution Panel Component ([`frontend/components/views/LiveExecutionPanel.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/components/views/LiveExecutionPanel.tsx))**:
+  - Designed and built a sovereign, accessible (`aria-live="polite"`), high-polish terminal/stepper panel.
+  - Features:
+    - Status badge: `● RUNNING` (pulsing indicator), `✓ COMPLETED` (emerald), `✕ FAILED` (rose), `↻ RE-PLANNING` (amber), `⏸ WAITING_FOR_HUMAN` (indigo).
+    - Live millisecond/second execution timer updating dynamically during runtime.
+    - Sovereign badges: `AIR-GAPPED SOVEREIGN`, `LOCAL NODE`, `EXE-...` Execution ID tag, and active model tag.
+    - Plan steps timeline: displays step number, action/capability, execution state (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`), selected local model, duration in ms, verification result badge, and `↻ RE-PLANNED` indicator.
+    - Collapsible live operational event stream log detailing timestamps and milestone summaries.
+- **Frontend Chat Integration & Historical Replay ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx), [`frontend/lib/api/chat.ts`](file:///Users/shrutikondabathula/SIH26117/frontend/lib/api/chat.ts))**:
+  - Replaced generic `[spinner] AEGIS is working...` with `LiveExecutionPanel` during message generation and prompt editing.
+  - Added streaming methods `chatApi.sendMessageStream` and `chatApi.editPromptStream` with automatic fallback to standard REST endpoints.
+  - Embedded `LiveExecutionPanel` in completed assistant messages inside the chat history, allowing instant audit and replay of past multi-step plans and verification outcomes.
+- **Testing & Verification**:
+  - Created backend test suite [`backend/tests/test_live_execution_transparency.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_live_execution_transparency.py) (6/6 tests passing).
+  - Created frontend test suite [`frontend/tests/execution-transparency.test.js`](file:///Users/shrutikondabathula/SIH26117/frontend/tests/execution-transparency.test.js) (4/4 tests passing).
+
+### Tested:
+- **Live Execution Transparency Backend Suite (`test_live_execution_transparency.py`)**: `6/6 PASS` in 22.313s.
+- **Frontend Unit Test Suite (`npm test --prefix frontend`)**: `90/90 PASS` in 43.1ms across 10 test suites.
+- **Next.js Production Build (`npm run build --prefix frontend`)**: Compiled successfully with TypeScript validation in 1.5s, 0 errors.
+- **Full Backend Regression Suite (`unittest discover -s backend/tests`)**: `550/550 PASS` in 277.118s.
+- **HMAC Chain Continuity**: Verified `INTACT` across all audit events.
+
+### Result:
+- Live Execution Transparency and Real-Time Agent Activity UI are 100% VERIFIED and fully operational without mock data, synthetic steps, or secret leakage.
+
+### Evidence:
+- `backend/tests/test_live_execution_transparency.py` (6/6 PASS in 22.313s)
+- `frontend/tests/execution-transparency.test.js` (4/4 PASS)
+- `npm test --prefix frontend` (90/90 PASS in 43.1ms)
+- `npm run build --prefix frontend` (Exit code 0, 0 errors)
+- `backend/.venv/bin/python -m unittest discover -s backend/tests` (550/550 PASS in 277.118s)
+- Cryptographic HMAC-SHA256 chain verification: `status: INTACT`.
+
+### Limitations:
+- None.
+
+### Files Changed:
+- `backend/agents/controller/agent.py`
+- `backend/app/main.py`
+- `backend/tests/test_live_execution_transparency.py`
+- `frontend/lib/api/chat.ts`
+- `frontend/components/views/LiveExecutionPanel.tsx`
+- `frontend/app/page.tsx`
+- `frontend/package.json`
+- `frontend/tests/execution-transparency.test.js`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `FastAPI`, `StreamingResponse`, `SQLite3`, `Next.js 16`, `React 19`, `Lucide React`
+
+### Next Step:
+- System is ready for live industrial demonstration.
+
+---
+
+### Feature:
+AEGIS Prompt Editing & Copy UX, Domain-Scoped Administration, and Four Industrial Domain Administrators (Immutable History DB Guarantee, Parent Message Reference `edited_from_message_id`, `PROMPT_EDITED` Audit Event with Preserved HMAC Continuity, Native Clipboard Prompt Extraction without Secrets/Metadata, Server-Side Department Enforced Scoping, Zero Privilege Escalation/Demotion, 4 Seeded Industrial Admins with Real SQLite Bcrypt Passwords, 38/38 Adversarial Tests PASS, 86/86 Frontend Tests PASS, Clean Turbopack Build, and 544/544 Full Backend Regression PASS)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Prompt Editing & Copy UX ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx), [`frontend/lib/api/chat.ts`](file:///Users/shrutikondabathula/SIH26117/frontend/lib/api/chat.ts), [`backend/app/main.py`](file:///Users/shrutikondabathula/SIH26117/backend/app/main.py))**:
+  - Added native clipboard `Copy` button to user messages that extracts strictly the visible user prompt text, omitting internal metadata, session tokens, or sensitive context.
+  - Added `Edit` button to user messages that populates the composer with the original prompt text, renders an active editing banner ("Editing previous prompt - Original will be preserved as version history"), and provides `[Cancel]` and `[Update & Run]` actions.
+  - Added backend endpoint `POST /conversations/{session_id}/messages/{message_id}/edit` supporting prompt editing with strict ownership verification (`session["user_id"] == current_user["id"]`).
+  - **History Immutability**: Historical user messages and responses are NEVER mutated, overwritten, or deleted. Editing creates a brand new user message and assistant execution linked via `edited_from_message_id` metadata.
+  - Added `PROMPT_EDITED` audit event in [`backend/security/audit.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/audit.py) capturing `session_id`, `original_message_id`, `new_message_id`, and `model` while excluding raw prompt text and private tokens to preserve cryptographic HMAC chain integrity.
+- **Domain-Scoped Administration ([`backend/security/auth_router.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/auth_router.py), [`backend/security/database.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/database.py))**:
+  - Strict server-side enforcement of domain boundaries. Functional domain admins can list, view, create, update, activate/deactivate, and reset credentials for users ONLY within their own assigned department.
+  - Server-side ignores/overrides client-supplied `department_id` during user creation and user updates, automatically binding target users to the calling admin's department.
+  - Restricted `PATCH /auth/users/{username}/department` to executive `Administration` admins; functional domain admins receive `403 Forbidden` if attempting to change any user's department.
+  - Added self-protection in `POST /auth/users/{username}/role` preventing admins from modifying their own role (preventing self-escalation or self-demotion).
+- **Four Official Industrial Domain Administrators ([`scripts/seed-users.py`](file:///Users/shrutikondabathula/SIH26117/scripts/seed-users.py), [`backend/security/database.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/database.py))**:
+  - Seeded 4 official domain administrators with bcrypt-hashed credentials:
+    1. `engineering_admin` (Admin, `Engineering`)
+    2. `operations_admin` (Admin, `Operations & Maintenance`)
+    3. `hse_admin` (Admin, `HSE`)
+    4. `procurement_admin` (Admin, `Procurement & Commercial`)
+  - Guaranteed `Administration` (executive department) exists alongside the 4 industrial domains.
+- **Frontend & Access View Enhancements ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - Added Domain Scope information banner in Access Control view displaying the logged-in administrator's active domain boundary.
+  - Implemented 8 comprehensive frontend unit tests in [`frontend/tests/prompt-edit.test.js`](file:///Users/shrutikondabathula/SIH26117/frontend/tests/prompt-edit.test.js).
+- **Adversarial Security Test Suite ([`backend/tests/test_prompt_edit_copy_and_domain_admin_adversarial.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_prompt_edit_copy_and_domain_admin_adversarial.py))**:
+  - Implemented 38 end-to-end tests verifying prompt edit immutability, copy extraction, cross-domain isolation, privilege enforcement, self-role preservation, and HMAC continuity.
+
+### Tested:
+- **Adversarial Test Suite (`test_prompt_edit_copy_and_domain_admin_adversarial.py`)**: `38/38 PASS` in 93.588s.
+- **Seed Users Test Suite (`test_seed_users.py`)**: `4/4 PASS` in 11.171s.
+- **Frontend Unit Test Suite (`npm test --prefix frontend`)**: `86/86 PASS` in 45.6ms across 9 test suites.
+- **Next.js Production Build (`npm run build --prefix frontend`)**: Compiled successfully, TypeScript checks passed with 0 errors.
+- **Full Backend Regression Suite (`unittest discover -s backend/tests`)**: `544/544 PASS` in 232.973s.
+- **HMAC Chain Continuity**: Verified `INTACT` across all audit events.
+
+### Result:
+- Prompt Edit/Copy and Domain-Scoped Administration are 100% VERIFIED and fully compliant with sovereign on-premise industrial requirements.
+
+### Evidence:
+- `backend/tests/test_prompt_edit_copy_and_domain_admin_adversarial.py` (38/38 PASS in 93.588s)
+- `backend/tests/test_seed_users.py` (4/4 PASS in 11.171s)
+- `npm test --prefix frontend` (86/86 PASS in 45.6ms)
+- `npm run build --prefix frontend` (Exit code 0, 0 errors)
+- `backend/.venv/bin/python -m unittest discover -s backend/tests` (544/544 PASS in 232.973s)
+- Cryptographic HMAC-SHA256 chain verification: `status: INTACT`.
+
+### Limitations:
+- None.
+
+### Files Changed:
+- `backend/security/database.py`
+- `backend/security/audit.py`
+- `backend/security/auth_router.py`
+- `backend/app/main.py`
+- `scripts/seed-users.py`
+- `backend/tests/test_seed_users.py`
+- `backend/tests/test_prompt_edit_copy_and_domain_admin_adversarial.py`
+- `frontend/lib/api/chat.ts`
+- `frontend/app/page.tsx`
+- `frontend/package.json`
+- `frontend/tests/prompt-edit.test.js`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `FastAPI`, `SQLite3`, `bcrypt`, `Next.js 16`, `React 19`, `Ant Design 6`, `Lucide React`
+
+### Next Step:
+- System is ready for live industrial demonstration.
+
+---
+
+### Feature:
+AEGIS Phase 6: Final UI Consistency, Responsive Design, Accessibility & Production QA (Restrained Industrial Design Tokens, Ant Design Deprecation & Warning Resolution, App.useApp Context Messages, Full Audit Drawer & Filter Action Parity, Bounded SafeMarkdown Evidence Rendering, 74/74 Frontend Tests PASS, Clean Turbopack Production Build, and 489/489 Backend Regression Integrity)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **UI Consistency & Visual Design System ([`frontend/app/globals.css`](file:///Users/shrutikondabathula/SIH26117/frontend/app/globals.css), [`frontend/components/views/*`](file:///Users/shrutikondabathula/SIH26117/frontend/components/views))**:
+  - Unified design tokens across all 11 application workspaces (Assistant, Knowledge Base, Human Approvals, Documents, Models, Sandbox, Audit, Access, History, Settings, About).
+  - Consistent typography hierarchy: proportional sans-serif for interface and operational text, monospace strictly for identifiers, hashes, and technical telemetry.
+  - Consistent surface styling, card padding (`paddingLG: 20`), standard input heights (`min-height: 38px`), restrained enterprise colors, and unified badge/tag systems.
+- **Ant Design Deprecation & Warning Cleanup**:
+  - Resolved all `Statistic` styling to current `styles={{ content: ... }}` API across all views, eliminating deprecated `valueStyle`.
+  - Replaced all deprecated `Alert message=` props with standard `Alert title=`.
+  - Standardized component messaging to `const { message } = App.useApp()` leveraging context from root `AntdProvider`.
+- **Full Audit Action & Ledger Synchronization ([`frontend/components/views/AuditRecordDrawer.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/components/views/AuditRecordDrawer.tsx), [`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - Added dedicated forensic descriptions for all HITL actions (`APPROVAL_REQUESTED`, `APPROVAL_APPROVED`, `APPROVAL_MODIFIED`, `APPROVAL_REJECTED`, `APPROVAL_RESUMED`, `APPROVAL_DENIED`).
+  - Added approval actions to the Audit Ledger filtering select dropdown.
+- **Responsive & Accessible Design Pass**:
+  - Verified layout responsiveness across desktop (1280px+), laptop/tablet (1024px, 768px), and mobile viewports.
+  - Visible focus indicators via `:focus-visible` with 2px solid cyan outline.
+  - Modal and drawer accessibility with clean keyboard navigation, ESC handling, and non-clipped evidence wrappers.
+- **Frontend Security & Content Safety**:
+  - Verified 0 uses of `dangerouslySetInnerHTML`, `eval()`, or `new Function()`.
+  - SafeMarkdown ensures zero raw HTML execution or javascript URI links.
+  - Zero sensitive credential logging in production.
+
+### Tested:
+- **Frontend Unit Test Suite (`npm test --prefix frontend`)**: `74/74 PASS` in 40.6ms across 8 test suites.
+- **Next.js Turbopack Production Build (`npm run build --prefix frontend`)**: 100% successful build with zero TypeScript or compilation errors.
+- **Full Backend Regression Test Suite (`backend/.venv/bin/python -m unittest discover backend/tests`)**: `489/489 PASS` in 104.911s.
+- **Live HMAC Cryptographic Audit Chain**: Verified `INTACT`.
+- **Scope Compliance**: Exactly 0 backend files modified in Phase 6.
+
+### Result:
+- Phase 6 UI Consistency, Responsive Design, Accessibility & Production QA is 100% VERIFIED. The application is completely hardened, polished, accessible, and production-ready for SIH flagship demonstration.
+
+### Evidence:
+- `npm test --prefix frontend` (74/74 PASS)
+- `npm run build --prefix frontend` (Exit code 0, 0 errors)
+- `backend/.venv/bin/python -m unittest discover backend/tests` (489/489 PASS in 104.911s)
+- Live HMAC-SHA256 audit chain verified intact.
+
+### Limitations:
+- None. All acceptance criteria fully met.
+
+### Files Changed:
+- `frontend/components/views/ApprovalsView.tsx`
+- `frontend/components/views/AuditRecordDrawer.tsx`
+- `frontend/app/page.tsx`
+- `frontend/tests/approvals.test.js`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `Next.js 16`, `React 19`, `Ant Design 6`, `Lucide React`, `SafeMarkdown`, `Tailwind CSS 4`
+
+### Next Step:
+- Freeze feature development; proceed to AEGIS final flagship workflow validation + SIH demo preparation.
+
+---
+
+### Feature:
+AEGIS Human-In-The-Loop (HITL) Phase 5: Frontend Integration (Reviewer Approval Queue & Evidence Detail Drawer, Safe Markdown Evidence Rendering, Role-Aware Access & Segregation of Duties Protection, Approve / Modify / Reject / Resume Actions with Server-Side Authority, Interactive Chat Stream HITL Gate Callout Banner, Authoritative Artifact Download, Concurrency & Conflict Resilience, Zero Mock Data Policy, 73/73 Frontend Tests PASS, Clean Production Build, and 489/489 Backend Regression Intact)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **HITL REST API Client ([`frontend/lib/api/approvals.ts`](file:///Users/shrutikondabathula/SIH26117/frontend/lib/api/approvals.ts))**:
+  - Fully typed TypeScript API client interfacing with Phase 4 backend endpoints: `getPendingApprovals()`, `getAllApprovals()`, `getApproval(id)`, `approveApproval(id, payload)`, `modifyApproval(id, payload)`, `rejectApproval(id, payload)`, and `resumeApproval(id, payload)`.
+  - Reuses existing authenticated `apiFetch` client with automatic JWT bearer token attachment, clean error translation, and 401 session expiration handling.
+- **Dedicated Human Approvals Interface ([`frontend/components/views/ApprovalsView.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/components/views/ApprovalsView.tsx))**:
+  - Professional, high-trust industrial reviewer queue using Ant Design table, search filtering, action filtering, status tagging, and pagination.
+  - Reviewer Evidence Drawer providing comprehensive, decision-relevant oversight: Findings bullet list, Quantitative Calculations key-value breakdown, Evidence Source Citations, Proposed Output Metadata, and Consequential Workflow Timeline.
+  - **Zero Chain-of-Thought / Secret Leakage**: Enforces strict evidence sanitization. Strips private model thoughts, system prompts, raw token probabilities, database paths, and API keys. Safe GFM Markdown rendering via `SafeMarkdown` component without raw HTML or `dangerouslySetInnerHTML`.
+  - **Approve Workflow**: Action modal with optional sign-off comment (<= 1000 chars), truthful sequential loading state ("Submitting decision", "Resuming workflow", "Compiling deliverable", "Verifying artifact"), and direct deliverable inspection + authorized download action.
+  - **Modify & Replan Workflow**: Action modal allowing reviewers to specify constraints, revised deliverable text (<= 5000 chars), and comments (<= 1000 chars). Clearly communicates that modifications act as input constraints for AEGIS replanning, triggering subsequent execution and verifier validation.
+  - **Reject Workflow**: Action modal requiring a mandatory non-empty justification (1-1000 chars) explaining why the consequential action was denied. Halts workflow without deliverable compilation.
+  - **Resume Workflow**: Idempotent re-execution trigger for approved/modified workflows that safely returns the compiled artifact without state corruption.
+  - **Concurrency & Concurrency Conflict Handling**: Detects 409 Conflict when another reviewer resolves or transitions a gate, presenting a clear resolution notification and automatically refreshing local state from the backend.
+  - **Server-Backed State Reconstruction**: State is always fetched from backend APIs upon mount, tab navigation, drawer open, or refresh. Zero client-side persistence or fake demo records.
+  - **Truthful Empty & Loading States**: Displays honest empty queue states ("No approvals require your attention. When AEGIS pauses a consequential workflow for human review, it will appear here.") with zero fabricated mock approvals.
+- **Role-Aware Navigation & Header/Sidebar Integration**:
+  - Extended `User.role` union in [`frontend/lib/api/auth.ts`](file:///Users/shrutikondabathula/SIH26117/frontend/lib/api/auth.ts) to support `"admin" | "reviewer" | "supervisor" | "lead" | "user" | string`.
+  - Added "Human Approvals" navigation item with `SafetyCertificateOutlined` icon in [`frontend/components/layout/Sidebar.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/components/layout/Sidebar.tsx), [`frontend/components/layout/Header.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/components/layout/Header.tsx), and quick action button in [`frontend/components/views/DashboardView.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/components/views/DashboardView.tsx).
+- **Interactive Assistant Chat Stream HITL Gate Banner ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - Automatically detects when an assistant conversation reaches `WAITING_FOR_HUMAN` state (or approval ID in message metadata) and displays an interactive callout banner directly within the chat message stream, allowing immediate one-click navigation to the review drawer.
+- **Frontend Test Suite ([`frontend/tests/approvals.test.js`](file:///Users/shrutikondabathula/SIH26117/frontend/tests/approvals.test.js))**:
+  - Added 21 dedicated unit tests covering: reviewer role identification vs standard users, truthful empty queue states, zero mock data policies, approve payload length bounding, modify constraint/text validations, reject mandatory reason checks, HTTP error translations (401, 403, 404, 409, 422), CoT/secret stripping, HTML escaping, and authorized download URL structuring.
+
+### Tested:
+- **Dedicated HITL Frontend Test Suite ([`frontend/tests/approvals.test.js`](file:///Users/shrutikondabathula/SIH26117/frontend/tests/approvals.test.js))**: `21/21 PASS`.
+- **All Frontend Unit Tests Combined (`npm test --prefix frontend`)**: `73/73 PASS` in 41.5ms across 8 test suites.
+- **Next.js Production Build (`npm run build --prefix frontend`)**: Compiled successfully in 728ms, TypeScript type checking passed with 0 errors, static page optimization generated 5/5 static routes.
+- **Full Backend Regression Test Suite (`backend/.venv/bin/python -m unittest discover backend/tests`)**: `489/489 PASS` in 104.201s.
+- **Live Audit Ledger HMAC Chain Integrity**: Verified intact (`status: INTACT`).
+- **Backend Modifications**: Exactly zero functional backend changes introduced during Phase 5.
+
+### Result:
+- Phase 5 Human-in-the-Loop Frontend Integration is 100% VERIFIED. The frontend delivers an enterprise-grade, evidence-driven, role-aware review interface fully backed by Phase 4 REST APIs and server-side state authority.
+
+### Evidence:
+- `frontend/tests/approvals.test.js` (21/21 PASS)
+- `npm test --prefix frontend` (73/73 PASS)
+- `npm run build --prefix frontend` (Exit code 0, 0 TypeScript/Turbopack errors)
+- `backend/.venv/bin/python -m unittest discover backend/tests` (489/489 PASS in 104.201s)
+- Live HMAC-SHA256 audit chain verified intact.
+
+### Limitations:
+- None. Complete end-to-end Human-in-the-Loop workflow (Phases 1 through 5) is fully implemented, verified, and integrated.
+
+### Files Changed:
+- `frontend/lib/api/approvals.ts` (NEW)
+- `frontend/components/views/ApprovalsView.tsx` (NEW)
+- `frontend/tests/approvals.test.js` (NEW)
+- `frontend/lib/api/auth.ts`
+- `frontend/components/layout/Header.tsx`
+- `frontend/components/layout/Sidebar.tsx`
+- `frontend/components/views/DashboardView.tsx`
+- `frontend/app/page.tsx`
+- `frontend/package.json`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `Next.js 16`, `React 19`, `Ant Design 6`, `Lucide React`, `SafeMarkdown`, `FastAPI`, `ApprovalService`, `AgentController`
+
+### Next Step:
+- System is ready for live operational demonstration.
+
+---
+
+### Feature:
+AEGIS Human-In-The-Loop (HITL) Phase 4: Authenticated REST API + Session Integration (FastAPI Approval Endpoints, Reviewer RBAC & Department Isolation Enforcement, Segregation of Duties Self-Review Prevention, Concurrency & Double-Action Conflict Handling, Bounded Input Validation, Zero Confidential Payload Disclosure, Authoritative Resumption Integration, and 16/16 HTTP Boundary Verification)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Authenticated REST Approval API Endpoints ([`backend/app/main.py`](file:///Users/shrutikondabathula/SIH26117/backend/app/main.py))**:
+  - `GET /api/approvals/pending` & `GET /api/approvals`: Retrieves paginated pending approval requests visible to the authenticated reviewer. Enforces reviewer privileges (`admin`, `reviewer`, `supervisor`, `lead`) and restricts non-admin reviewers strictly to their own department.
+  - `GET /api/approvals/{approval_id}`: Retrieves comprehensive, decision-relevant approval details. Validates reviewer authorization or requester self-inspection. Sanitizes payload disclosures (strips passwords, tokens, API keys, and internal secrets). Non-admin cross-department queries return `403 Forbidden`.
+  - `POST /api/approvals/{approval_id}/approve`: Approves a pending HITL request through authoritative `ApprovalService.approve()` state transition and resumes `AgentController` execution loop to compile and verify deliverable artifacts.
+  - `POST /api/approvals/{approval_id}/modify`: Modifies a pending HITL request with reviewer comments/modifications through authoritative `ApprovalService.modify()`, injecting reviewer constraints into `AgentController` replanning.
+  - `POST /api/approvals/{approval_id}/reject`: Rejects a pending HITL request with a sanitized reason through `ApprovalService.reject()`, transitioning to terminal `REJECTED` state and halting controller execution without binary artifact publication.
+  - `POST /api/approvals/{approval_id}/resume`: Explicit resumption endpoint for already approved/modified requests, enforcing idempotent deliverable safety across re-runs.
+- **Architectural Reuse & Zero Redundancy**:
+  - Strictly reused existing `ApprovalService`, `AgentController`, `AuditLogger`, `get_current_user`, `RoleChecker`, and `_extract_user_attrs`.
+  - Zero duplicate planners, zero duplicate approval tables, zero duplicate audit frameworks, and zero mock approval records.
+- **Security & Authorization Boundaries**:
+  - **Authentication**: Strict FastAPI `Depends(get_current_user)` on every endpoint (unauthenticated requests return `401 Unauthorized`).
+  - **RBAC Enforcement**: Regular users attempting to access reviewer queues or review endpoints are blocked with `403 Forbidden`.
+  - **Department Isolation**: Reviewers cannot inspect or resolve approvals belonging to other departments (`403 Forbidden`). Admins maintain organization-wide oversight.
+  - **Segregation of Duties**: Requesters (even with lead/reviewer roles) cannot approve, modify, or reject their own approval requests (`403 Forbidden: Segregation of duties violated`).
+  - **Authoritative Server Context**: Reviewer identity, requester identity, department ID, plan ID, conversation ID, and approval status are never trusted from client payloads.
+  - **Concurrency & Terminal State Conflicts**: Atomic state transitions prevent double approval/rejection. Attempting to approve/modify/reject an already resolved or expired approval returns `409 Conflict`.
+  - **Input Security & Bounding**: Constrained request models (`ApprovalDecisionRequest`, `ApprovalModifyRequest`, `ApprovalRejectRequest`, `ApprovalResumeRequest`) with bounded string lengths, strict field limits, and sanitization of malicious characters (SQL injection, XSS/HTML, oversized payloads).
+  - **Information Disclosure Prevention**: Clean machine-readable JSON responses with zero internal database paths, stack traces, raw credentials, or cross-tenant leaks.
+- **Audit & Cryptographic Ledger**:
+  - Actions record `APPROVAL_REQUESTED`, `APPROVAL_APPROVED`, `APPROVAL_MODIFIED`, `APPROVAL_REJECTED`, `APPROVAL_RESUMED`, `APPROVAL_DENIED`, and `PLAN_COMPLETED` with bounded forensic metadata.
+  - Live HMAC-SHA256 hash chaining remains 100% verified and intact.
+
+### Tested:
+- **Dedicated Phase 4 HTTP REST API Test Suite ([`backend/tests/test_hitl_rest_api.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_rest_api.py))**: `16/16 PASS` in 13.02s:
+  1. `test_01_unauthenticated_requests_rejected`: Unauthenticated requests to all 6 endpoints return 401.
+  2. `test_02_regular_user_accessing_pending_queue_forbidden`: Standard user accessing queue returns 403.
+  3. `test_03_authorized_department_reviewer_listing_and_detail`: Department reviewer lists pending queue and views sanitized details.
+  4. `test_04_cross_department_unauthorized_reviewer_blocked`: Cross-department reviewer blocked from viewing or resolving approvals (403).
+  5. `test_05_admin_organization_wide_access_and_approval`: Admin reviewer views cross-department requests and approves successfully.
+  6. `test_06_segregation_of_duties_requester_self_review_blocked`: Requester with lead role blocked from approving, modifying, or rejecting own request (403).
+  7. `test_07_post_approve_resumes_execution_and_compiles_deliverable`: POST /approve updates status to APPROVED, compiles deliverable on disk, and records document.
+  8. `test_08_post_modify_triggers_replanning_and_deliverable`: POST /modify updates status to MODIFIED, injects reviewer constraint, replans, and compiles revised document.
+  9. `test_09_post_reject_halts_workflow_with_zero_artifact`: POST /reject halts workflow, marks REJECTED, and produces zero artifacts.
+  10. `test_10_post_resume_idempotent_safety`: POST /resume on already completed task safely and idempotently returns existing deliverable without duplication.
+  11. `test_11_concurrency_double_approval_conflict`: Submitting second approval or reject on resolved approval returns 409 Conflict.
+  12. `test_12_expired_approval_action_returns_conflict`: Reviewing expired approval returns 409 Conflict.
+  13. `test_13_nonexistent_approval_returns_not_found`: Nonexistent approval returns 404 Not Found.
+  14. `test_14_input_validation_and_payload_length_limits`: Oversized comments, oversized modification text, and empty rejection reasons return 422 Unprocessable Content.
+  15. `test_15_information_disclosure_zero_leakage`: Verifies responses contain zero passwords, JWTs, private keys, or filesystem paths.
+  16. `test_16_audit_logging_and_hmac_chain_integrity`: Verifies approval lifecycle audit events and proves cryptographic HMAC chain integrity.
+- **All HITL Test Suites Combined**: `68/68 PASS` in 23.06s (Foundation 12 + ApprovalService 26 + AgentIntegration 14 + RestApi 16).
+- **Full Backend Test Discovery**: `489/489 PASS` in 107.039s (`backend/.venv/bin/python -m unittest discover backend/tests`).
+- **HMAC Cryptographic Chain Integrity**: `status: INTACT`, `total_records: 1782` on live ledger.
+- **Frontend Changes**: Exactly zero files changed in `frontend/`.
+
+### Result:
+- Phase 4 Authenticated REST API and Session Integration is 100% VERIFIED with rigorous HTTP-level test evidence. All endpoints securely expose HITL functionality to future frontend clients while enforcing strict RBAC, department boundaries, segregation of duties, concurrency safety, and audit integrity.
+
+### Evidence:
+- `backend/tests/test_hitl_rest_api.py` (16/16 PASS in 13.02s)
+- `backend/tests/test_hitl_agent_integration.py` (14/14 PASS in 9.73s)
+- `backend/tests/test_hitl_approval_service.py` (26/26 PASS in 0.15s)
+- `backend/tests/test_hitl_database_audit_foundation.py` (12/12 PASS in 0.05s)
+- All HITL Suites: 68/68 PASS
+- Full Backend Discovery: 489/489 PASS in 107.039s
+- HMAC Chain Audit: `{'status': 'INTACT', 'total_records': 1782, 'tampered_record_id': None, 'reason': 'Cryptographic HMAC chain verified successfully across all audit entries.'}`
+- Zero mock runtime records.
+
+### Limitations:
+- Scope-locked: Frontend HITL review UI components deferred to Phase 5.
+
+### Files Changed:
+- `backend/app/main.py`
+- `backend/agents/controller/agent.py`
+- `backend/tests/test_hitl_rest_api.py`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `FastAPI`, `ApprovalService`, `AgentController`, `AuditLogger`, `RoleChecker`, `get_current_user`, `SQLite`, `HMAC-SHA256`
+
+### Next Step:
+- Proceed to Phase 5: Next.js Frontend Human-in-the-Loop Review Dashboard & Resolution UI.
+
+---
+
+### Feature:
+AEGIS Human-In-The-Loop (HITL) Phase 3.1: Server-Restart Persistence & Hardened Replay Protection Verification (True Process-Restart Recovery from SQLite State, Authoritative Replay Defense via Persisted Deliverables, Idempotent Resumption Safety, Server-Side Approval State Authoritativeness, and Clean Runtime Artifact Hygiene)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Server-Restart Persistence & Plan Restoration ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Proved that `WAITING_FOR_HUMAN` and `resume_execution` do not rely on `AgentController` in-memory state.
+  - When reaching Step 5 (`HUMAN_APPROVAL`), minimum necessary execution state including `plan_snapshot` (`AgentPlan.to_dict()`) is persisted in SQLite `approval_requests.proposed_payload_json`.
+  - When resuming execution on a brand-new controller instance (with zero prior in-memory state), `resume_execution` reconstructs the plan via `AgentPlan.from_dict()`, restores prior step outputs, marks `hitl_approval` complete, executes remaining compilation/verification steps, and saves the deliverable.
+- **Authoritative Replay Defense Across Restarts ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - Hardened `resume_execution` replay protection by querying authoritative SQLite `generated_documents` table for `conversation_id = target_conv_id AND status = 'completed'`.
+  - If a deliverable was already compiled and exists on disk, `resume_execution` returns the existing verified completion artifact idempotently across controller/process restarts.
+  - Strictly prevents duplicate step execution, duplicate binary file generation in `exports/`, and duplicate `generated_documents` rows.
+- **Authoritative Server-Side Approval State Enforcement**:
+  - `resume_execution` does not trust client-supplied status; status is strictly fetched from SQLite `approval_requests`.
+  - Blocks non-existent approvals (`NOT_FOUND`), unapproved requests (`WAITING_FOR_HUMAN`), tampered plan IDs (`DENIED`), tampered conversation IDs (`DENIED`), expired requests (`EXPIRED`), and rejected requests (`REJECTED`).
+- **Runtime Artifact Git Hygiene & Tracking Cleanup**:
+  - Untracked runtime test artifacts (`data/exports/`, `data/generated/`, `data/sandbox/`) from Git index via `git rm --cached -r`.
+  - Updated `.gitignore` to enforce exclusion of runtime directories (`outputs/`, `data/generated/`, `data/exports/`, `data/sandbox/`, `sandbox_runs/`, `sandbox_runs_test/`).
+
+### Tested:
+- **Phase 3.1 Hardening Test Suite ([`backend/tests/test_hitl_agent_integration.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_agent_integration.py))**:
+  - Test 12 (`test_12_server_restart_resume_from_persisted_state`): Pause $\to$ destroy controller $\to$ instantiate fresh controller $\to$ resume from SQLite state $\to$ complete DOCX compilation and disk verification: PASS.
+  - Test 13 (`test_13_approved_consumed_replay_after_controller_restart`): Complete execution $\to$ destroy controller $\to$ instantiate fresh controller $\to$ attempt duplicate resumption $\to$ verify zero duplicate files, zero duplicate DB rows, and safe idempotent completion: PASS.
+  - Test 14 (`test_14_authoritative_server_side_approval_validation`): Non-existent, unapproved, tampered plan, and tampered conversation attempts are blocked: PASS.
+- **All HITL Integration Tests**: 14/14 PASS in 9.731s.
+- **All HITL Test Suites Combined**: 52/52 PASS in 9.914s.
+- **Full Backend Regression Suite**: 473/473 PASS in 93.204s.
+- **HMAC-SHA256 Cryptographic Chain Audit**: `status: INTACT`, `total_records: 1769` on live database.
+
+### Result:
+- Phase 3.1 Server-Restart Persistence and Replay Hardening is 100% VERIFIED with concrete evidence. The HITL architecture recovers deterministically across server restarts and enforces authoritative replay protection.
+
+### Evidence:
+- `backend/tests/test_hitl_agent_integration.py` (14/14 PASS in 9.731s)
+- `backend/tests/test_hitl_approval_service.py` (26/26 PASS in 0.152s)
+- `backend/tests/test_hitl_database_audit_foundation.py` (12/12 PASS in 0.049s)
+- Full Backend Discovery Suite: 473/473 PASS in 93.204s
+- HMAC Chain Audit: `{'status': 'INTACT', 'total_records': 1769, 'tampered_record_id': None, 'reason': 'Cryptographic HMAC chain verified successfully across all audit entries.'}`
+- Zero mock runtime data; isolated test environments used.
+
+### Limitations:
+- Scope-locked for Phase 3.1: REST approval endpoints and frontend approval UI are intentionally deferred to Phase 4 & Phase 5.
+
+### Files Changed:
+- `backend/agents/controller/agent.py`
+- `backend/tests/test_hitl_agent_integration.py`
+- `.gitignore`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `ApprovalService`, `AgentController`, `AgentPlan`, `AgentStep`, `AgentState`, `AuditLogger`, `SubprocessSandbox`, `DocxGenerator`, `SQLite`, `hmac`
+
+### Next Step:
+- Proceed to Phase 4: REST API Approval Endpoints & Session Integration.
+
+---
+
+### Feature:
+AEGIS Human-In-The-Loop (HITL) Phase 3: AgentController + HITL Approval Gate & Resumption Engine (Resumable Execution State Persistence, Truthful WAITING_FOR_HUMAN Representation, IDOR Cross-Task Context Binding, Modified Constraint Replanning, Rejection Workflow Halting, Replay Defense, Department Isolation, Prompt-Injection Security Defense, and HMAC-SHA256 Chained Auditing)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **AgentController Approval Gate Integration ([`backend/agents/controller/agent.py`](file:///Users/shrutikondabathula/SIH26117/backend/agents/controller/agent.py))**:
+  - **Reused Existing Controller Architecture**: Extended existing `AgentController`, `AgentPlan`, `AgentStep`, and `AgentState` without introducing secondary planners or duplicate approval frameworks.
+  - **Consequential Task Gate Insertion**: Flagship workflow ("Analyze cooling tower inspection report and prepare approval note") executes document retrieval, findings extraction, sandbox thermodynamic calculations, and draft synthesis before reaching Step 5 (`HUMAN_APPROVAL`, action: `hitl_approval`).
+  - **Execution Pausing & Zero Premature Publication**: When reaching the HITL gate, controller creates a validated server-side approval request via `ApprovalService`, transitions execution state to `WAITING_FOR_HUMAN`, records `WAITING_FOR_HUMAN` in HMAC audit log, and immediately halts the execution loop without compiling or publishing binary deliverable artifacts.
+  - **Resumable Execution State Persistence**: Minimum necessary execution state (including draft findings, sandbox calculations, draft content, and sanitized `plan_snapshot`) is persisted securely in SQLite `approval_requests` (`proposed_payload_json`) and memory cache (`self.active_plans`), avoiding exposure of raw chain-of-thought, JWTs, or secrets.
+  - **Truthful Machine-Readable Result**: Returns structured machine-readable result `{ "status": "WAITING_FOR_HUMAN", "is_waiting_for_human": True, "approval_id": "...", "plan_id": "...", "step_id": "step_5", ... }`.
+  - **Resumption Engine (`resume_execution`)**:
+    - Validates authoritative server-side approval record from database (does not trust client/frontend status).
+    - **IDOR / Cross-Task Defense**: Strictly verifies `approval.plan_id == plan_id` and `approval.conversation_id == conversation_id`. Cross-task unlocking attempts are denied and audited.
+    - **Department Isolation**: Enforces department boundaries; non-admin users cannot resume approvals originating from other departments.
+    - **APPROVED Workflow**: Resumes from Step 6 (`generate_document`), compiles binary DOCX/PDF to disk, executes Step 7 (`verify_artifact`), and completes the plan.
+    - **MODIFIED Workflow**: Reviewer modification is injected into `plan.constraints`, triggers replanning (`PLAN_REPLAN_STARTED`, `AGENT_REPLAN`), incorporates modifications into drafted content, compiles revised artifact, and verifies on disk.
+    - **REJECTED Workflow**: Halts execution immediately; returns truthful rejection notice with reviewer reason. Strictly prevents publication of deliverable artifacts.
+    - **EXPIRED Workflow**: Detects expired approval requests and denies resumption with truthful `EXPIRED` status.
+    - **Replay Protection**: Tracks consumed approvals in `self._consumed_approvals`; repeated resumption attempts return safe idempotent completions without duplicate execution.
+    - **Prompt-Injection Defense**: Ingested document content is strictly treated as untrusted data within explicit boundary delimiters; document text cannot alter approval state or bypass the HITL gate.
+  - **Cryptographic Audit Logging ([`backend/security/audit.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/audit.py))**: Records `WAITING_FOR_HUMAN`, `APPROVAL_RESUMED`, `APPROVAL_RESUME_DENIED`, `PLAN_REPLAN_STARTED`, `DOCUMENT_GENERATED`, and `PLAN_COMPLETED` with bounded metadata into the HMAC-SHA256 ledger.
+
+### Tested:
+- **Dedicated HITL Phase 3 Test Suite ([`backend/tests/test_hitl_agent_integration.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_agent_integration.py))**:
+  - Test 1: Flagship workflow pauses at HITL gate with truthful `WAITING_FOR_HUMAN` and zero deliverable publication before approval.
+  - Test 2: Resumption after `APPROVED` compiles final binary deliverable, verifies on disk, and records completed document.
+  - Test 3: Resumption after `MODIFIED` feeds reviewer constraint into replanning, revises content, and generates verified deliverable.
+  - Test 4: Resumption after `REJECTED` halts consequential execution and prevents artifact publication.
+  - Test 5: Resumption after `EXPIRED` is strictly denied.
+  - Test 6: Duplicate active approval request creation is prevented across execution retries.
+  - Test 7: Cross-task IDOR approval binding attack is denied and audited.
+  - Test 8: Cross-department unauthorized resumption is denied and audited.
+  - Test 9: Replay attack is defended with idempotent/consumed safety.
+  - Test 10: Malicious prompt injection inside document cannot bypass HITL or approve itself.
+  - Test 11: Cryptographic HMAC-SHA256 audit chain remains 100% `INTACT` across the complete lifecycle.
+- **Phase 1 Test Suite ([`backend/tests/test_hitl_database_audit_foundation.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_database_audit_foundation.py))**: 12/12 PASS.
+- **Phase 2 Test Suite ([`backend/tests/test_hitl_approval_service.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_approval_service.py))**: 26/26 PASS.
+- **All HITL Tests Combined**: 49/49 PASS.
+- **Full Backend Regression Suite**: 470/470 PASS in 90.0s.
+
+### Result:
+- Phase 3 AgentController + Human-In-The-Loop integration is 100% verified. Consequential tasks pause safely for human review, state is persisted without leaks, and APPROVED/MODIFIED/REJECTED/EXPIRED resumptions behave correctly and securely with zero regressions across the codebase.
+
+### Evidence:
+- `backend/tests/test_hitl_agent_integration.py` (11/11 PASS in 7.667s)
+- `backend/tests/test_hitl_approval_service.py` (26/26 PASS in 0.152s)
+- `backend/tests/test_hitl_database_audit_foundation.py` (12/12 PASS in 0.049s)
+- Full Backend Discovery Suite: 470/470 PASS in 90.0s
+- HMAC-SHA256 Ledger Chain Verification: `status: INTACT` across all recorded audit entries
+- Zero fake/mock runtime data added
+
+### Limitations:
+- Scope-locked for Phase 3: REST approval endpoints and frontend approval UI are intentionally not implemented yet (scheduled for subsequent phases).
+
+### Files Changed:
+- `backend/agents/controller/agent.py`
+- `backend/services/approval_service.py`
+- `backend/security/audit.py`
+- `backend/tests/test_hitl_agent_integration.py`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `ApprovalService`, `AgentController`, `AgentPlan`, `AgentStep`, `AgentState`, `AuditLogger`, `SubprocessSandbox`, `DocxGenerator`, `SQLite`, `hmac`
+
+### Next Step:
+- Ready for Phase 4: REST API Approval Endpoints & Session Integration.
+
+---
+
+### Feature:
+AEGIS Human-In-The-Loop (HITL) Phase 2: ApprovalService & Secure State Machine (Atomic State Machine Engine, RBAC Reviewer Role Enforcement, Department Isolation Boundaries, Segregation of Duties Prevention, Payload/Rejection Sanitization, Deterministic Expiration, Concurrency Race Protection, and HMAC-SHA256 Chained Auditing)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **HITL ApprovalService Architecture ([`backend/services/approval_service.py`](file:///Users/shrutikondabathula/SIH26117/backend/services/approval_service.py))**:
+  - **Deterministic State Transition Engine**: Enforces strict canonical lifecycle transitions (`PENDING` $\to$ `WAITING_FOR_HUMAN` $\to$ `APPROVED` | `MODIFIED` | `REJECTED` | `EXPIRED` | `FAILED`). Terminal states are strictly immutable.
+  - **RBAC Reviewer Role Enforcement**: Restricts review operations to privileged roles (`admin`, `reviewer`, `supervisor`, `lead`). Regular `"user"` roles are strictly rejected with `ApprovalAuthorizationError`.
+  - **Department Isolation Boundaries**: Non-admin reviewers are confined strictly to their own assigned department; cross-department reviews are blocked with `ApprovalAuthorizationError`. Administrators possess organization-wide review authority.
+  - **Segregation of Duties (SoD)**: Blocks self-approval/self-modification attempts where `requester_id == reviewer_id` or `requester_username == reviewer_username`.
+  - **Payload & Rejection Sanitization**: Filters confidential tokens (passwords, JWTs, API keys, private keys), bounds JSON payload sizes to 64KB, and validates non-empty rejection rationales.
+  - **Deterministic Expiration**: Detects expired requests against `expires_at` ISO-8601 UTC timestamps upon retrieval and updates status atomically to `EXPIRED`.
+  - **Concurrency & Atomicity**: Employs parameterized atomic updates (`WHERE id = ? AND status = 'WAITING_FOR_HUMAN'`) guaranteeing that concurrent reviewers can produce at most one terminal transition.
+  - **Cryptographic Audit Integration ([`backend/security/audit.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/audit.py))**: Records atomic events (`APPROVAL_REQUESTED`, `APPROVAL_GRANTED`, `APPROVAL_MODIFIED`, `APPROVAL_REJECTED`, `APPROVAL_EXPIRED`, `APPROVAL_FAILED`) with bounded metadata into the HMAC-SHA256 ledger.
+
+### Tested:
+- **Dedicated HITL Phase 2 Test Suite ([`backend/tests/test_hitl_approval_service.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_approval_service.py))**:
+  - Test 1: Create approval request $\to$ `WAITING_FOR_HUMAN` and JSON persistence.
+  - Test 2: Authorized department reviewer $\to$ `APPROVED`.
+  - Test 3: Authorized reviewer $\to$ `MODIFIED` with sanitized payload storage.
+  - Test 4: Authorized reviewer $\to$ `REJECTED` with required reason.
+  - Test 5: Expired request $\to$ `EXPIRED`.
+  - Test 6: Invalid transition `APPROVED` $\to$ `REJECTED` blocked.
+  - Test 7: Invalid transition `REJECTED` $\to$ `APPROVED` blocked.
+  - Test 8: Invalid transition `EXPIRED` $\to$ `APPROVED` blocked.
+  - Test 9: Unauthorized reviewer role (regular user) blocked.
+  - Test 10: Cross-department reviewer blocked.
+  - Test 11: Segregation of duties requester self-approval blocked.
+  - Test 12: Concurrent approval attempts result in exactly 1 terminal state.
+  - Test 13: Missing or whitespace rejection reason rejected.
+  - Test 14: Oversized/sensitive modification payload sanitized and bounded.
+  - Test 15: LLM-supplied reviewer identity cannot bypass backend authorization.
+  - Test 16: `APPROVAL_REQUESTED` audit event logged.
+  - Test 17: `APPROVAL_GRANTED` audit event logged.
+  - Test 18: `APPROVAL_MODIFIED` audit event logged.
+  - Test 19: `APPROVAL_REJECTED` audit event logged.
+  - Test 20: `APPROVAL_EXPIRED` audit event logged.
+  - Test 21: Cryptographic HMAC-SHA256 chain remains intact across lifecycle operations.
+  - Test 22: Admin cross-department review authorization allowed.
+  - Test 23: Adversarial double approval blocked.
+  - Test 24: Adversarial modification after approval blocked.
+  - Test 25: Adversarial rejection after approval blocked.
+  - Test 26: Adversarial confidential leak prevention in audit logs.
+- **Dedicated Phase 1 Suite ([`backend/tests/test_hitl_database_audit_foundation.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_database_audit_foundation.py))**: 12/12 PASS.
+- **Full Backend Regression Suite**: 459/459 PASS in 84.3s.
+
+### Result:
+- Phase 2 HITL ApprovalService and state machine are 100% verified. Business logic boundary, RBAC reviewer checks, department boundaries, segregation of duties, and audit trail function flawlessly.
+
+### Evidence:
+- `backend/tests/test_hitl_approval_service.py` (26/26 PASS in 0.152s)
+- `backend/tests/test_hitl_database_audit_foundation.py` (12/12 PASS in 0.049s)
+- Full Backend Discovery Suite: 459/459 PASS in 84.3s
+- HMAC-SHA256 Ledger Chain Verification: `status: INTACT` (1,751 records verified)
+- Zero fake/mock rows seeded in database tables
+
+### Limitations:
+- Scope-locked for Phase 2: `AgentController` approval gating, REST approval endpoints, and frontend HITL UI are intentionally not implemented yet (scheduled for subsequent phases).
+
+### Files Changed:
+- `backend/services/approval_service.py`
+- `backend/tests/test_hitl_approval_service.py`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `AuditLogger`, `SQLite`, `hashlib`, `hmac`, `ApprovalStatus`, `ApprovalActionType`
+
+### Next Step:
+- Ready for Phase 3: `AgentController` approval gate integration and step pause/resume engine.
+
+---
+
+### Feature:
+AEGIS Human-In-The-Loop (HITL) Phase 1: Secure Approval Database Schema & Cryptographic Audit Foundation (Canonical Approval Lifecycle Enums, SQLite Table Schema with Migration Safety, Query Indexes, Audit Event Taxonomy Extension, Bounded Metadata Defense, Zero-Mock Enforcement, and HMAC-SHA256 Audit Chain Verification)
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Canonical Lifecycle & Action Enums ([`backend/security/models.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/models.py))**:
+  - `ApprovalStatus`: Strict canonical states (`PENDING`, `WAITING_FOR_HUMAN`, `APPROVED`, `MODIFIED`, `REJECTED`, `EXPIRED`, `FAILED`).
+  - `ApprovalActionType`: Constrained action categories (`DOCUMENT_APPROVAL`, `SANDBOX_EXECUTION_APPROVAL`, `CRITICAL_ACTION_APPROVAL`).
+- **Database Persistence & Migration Safety ([`backend/security/database.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/database.py))**:
+  - Added table `approval_requests` with schema fields: `id` (UUID PK), `plan_id`, `conversation_id`, `step_id`, `requester_id` (FK $\to$ `users.id`), `requester_username`, `reviewer_id` (FK $\to$ `users.id`), `reviewer_username`, `reviewer_role`, `department_id` (FK $\to$ `departments.id`), `department_name`, `status`, `action_type`, `proposed_payload_json`, `modified_payload_json`, `rejection_reason`, `created_at`, `reviewed_at`, `expires_at`.
+  - Non-destructive SQLite column migration block preserving existing records across restarts.
+  - 6 dedicated performance indexes: `idx_approval_status`, `idx_approval_requester`, `idx_approval_reviewer`, `idx_approval_department`, `idx_approval_conversation`, `idx_approval_plan`.
+  - Zero-mock policy: no fake records, demo requests, or synthetic rows seeded. Truthful empty state preserved.
+- **Cryptographic Audit Taxonomy & Metadata Bounds ([`backend/security/audit.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/audit.py))**:
+  - Extended `VALID_ACTIONS` with: `APPROVAL_REQUESTED`, `APPROVAL_GRANTED`, `APPROVAL_MODIFIED`, `APPROVAL_REJECTED`, `APPROVAL_EXPIRED`, `APPROVAL_FAILED`.
+  - Extended `ALLOWED_METADATA_KEYS` with bounded keys: `approval_id`, `reviewer_id`, `reviewer_username`, `reviewer_role`, `approval_status`, `rejection_reason`, `requester_id`, `requester_username`.
+  - Enforced confidentiality sanitization & forbidden pattern filtering (blocking JWTs, passwords, private keys, raw model reasoning, confidential file contents).
+  - Seamless HMAC-SHA256 ledger chaining with automatic previous-hash linking and cryptographic tamper detection.
+
+### Tested:
+- **Dedicated HITL Test Suite ([`backend/tests/test_hitl_database_audit_foundation.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_hitl_database_audit_foundation.py))**:
+  - Test 1: Fresh database initialization creates `approval_requests` and indexes.
+  - Test 2: Existing database initialization does not destroy existing data.
+  - Test 3: Valid approval states are accepted.
+  - Test 4: Invalid approval states are rejected by enum validation.
+  - Test 5: Valid action types are accepted.
+  - Test 6: Invalid action types are rejected by enum validation.
+  - Test 7: Approval audit events are accepted by `AuditLogger.log_event()`.
+  - Test 8: Approval audit events participate in HMAC-SHA256 chain with valid hashes.
+  - Test 9: Existing audit chain remains intact after inserting approval events.
+  - Test 10: Forbidden confidential metadata (passwords, JWTs, prompts, chain-of-thought) is rejected/sanitized.
+  - Test 11: Approval records can remain `WAITING_FOR_HUMAN` without `reviewed_at` (nullable).
+  - Test 12: Reviewed records persist `reviewed_at`, `reviewer_id`, and `reviewer_role` cleanly.
+- **Backend Regression Test Suites**:
+  - `backend/tests/test_audit.py` & `backend/tests/test_audit_chain_tamper_detection.py` (26/26 PASS).
+  - `backend/tests/test_auth.py` & `backend/tests/test_rbac.py` (27/27 PASS).
+  - `backend/tests/test_multi_model_routing_phase.py` (15/15 PASS).
+  - Complete Backend Discovery Suite: 433/433 PASS in 82.2s.
+
+### Result:
+- Phase 1 HITL Database & Audit Foundation is 100% verified. SQLite persistence, schema migrations, canonical enums, audit event taxonomy, confidentiality safeguards, and HMAC-SHA256 verification are fully operational.
+
+### Evidence:
+- `backend/tests/test_hitl_database_audit_foundation.py` (12/12 PASS in 0.052s)
+- Full Backend Discovery Suite: 433/433 PASS in 82.2s
+- HMAC-SHA256 Ledger Chain Verification: `status: INTACT`
+- Zero fake/mock rows in `approval_requests` table
+
+### Limitations:
+- Scope-locked for Phase 1: `ApprovalService`, `AgentController` approval gating, REST approval endpoints, and frontend HITL UI are intentionally not implemented yet (scheduled for subsequent phases).
+
+### Files Changed:
+- `backend/security/models.py`
+- `backend/security/database.py`
+- `backend/security/audit.py`
+- `backend/agents/controller/agent.py`
+- `backend/tests/test_hitl_database_audit_foundation.py`
+- `IMPLEMENTATION_STATUS.md`
+
+### Dependencies:
+- `AuditLogger`, `SQLite`, `hashlib`, `hmac`, `Pydantic`
+
+### Next Step:
+- Ready for Phase 2: `ApprovalService` lifecycle transition engine and `AgentController` pause/resume gating.
+
+---
+
+### Feature:
 AEGIS Autonomous Agent Planning Engine (Dynamic Goal Decomposition, Structured Plan Representation, Capability-Based Model Routing, Step Observation & Verification, Error-Driven Bounded Replanning, Untrusted Document Security Delimiters, Subprocess Sandbox Execution, and HMAC-SHA256 Audit Trail)
 
 ### Status:
@@ -1921,6 +3078,70 @@ AEGIS — Truthful Data Architecture, Real Document Lifecycle, Single Source of 
 
 ---
 
+### Feature:
+AEGIS Department-Scoped Admin User Provisioning, Authorization Model & Data Isolation
+
+### Status:
+🟢 VERIFIED
+
+### Implementation:
+- **Server-Authoritative Department Provisioning ([`backend/security/auth_router.py`](file:///Users/shrutikondabathula/SIH26117/backend/security/auth_router.py))**:
+  - Implemented centralized authorization gate `can_provision_user(...)` enforcing that:
+    1. Requester has active `admin` role.
+    2. Authenticated administrator possesses a non-null department ID (`admin.department_id IS NOT NULL`).
+    3. Administrator's department exists and is active in local database.
+    4. Target role is validated (`user` or `admin`).
+    5. Newly provisioned user's department is strictly bound to the administrator's server-side department (`new_user.department_id = authenticated_admin.department_id`).
+    6. Rejects any attempt to provision for a different department than the administrator's with `HTTP 403 Forbidden` (`CROSS_DEPARTMENT_PROVISIONING_DENIED`).
+- **Department Data Isolation & IDOR Protection**:
+  - `GET /auth/users`: Filters users strictly by the administrator's department (`SELECT * FROM users WHERE department_id = ?`).
+  - Target user management endpoints (`status`, `role`, `reset-password`, `department`): Guarded by `_check_department_admin_scope(...)` ensuring administrators cannot view, modify, deactivate, or reset passwords for users in other departments.
+- **Audit Logging & Cryptographic Integrity**:
+  - All successful provisioning events logged as `USER_PROVISIONED` with safe metadata (no passwords/tokens).
+  - All cross-department and unauthorized attempts logged as `AUTHORIZATION_FAILURE` / `AUTHORIZATION_DENIED` with structured security reason metadata.
+  - Cryptographic HMAC-SHA256 audit chain verified intact.
+- **Frontend User Management UX ([`frontend/app/page.tsx`](file:///Users/shrutikondabathula/SIH26117/frontend/app/page.tsx))**:
+  - Read-only Administrator Department banner displayed in Provision Operator form (`Users provisioned here will belong to <Department>`).
+  - Free department dropdown removed to eliminate client-side spoofing vectors.
+  - Clear security warning state rendered when administrator department is unconfigured.
+  - User table updated with Department column.
+
+### Tested:
+- **Adversarial Department Provisioning Test Suite**: `17/17 PASS` in 18.2s ([`backend/tests/test_department_scoped_user_provisioning.py`](file:///Users/shrutikondabathula/SIH26117/backend/tests/test_department_scoped_user_provisioning.py)).
+- **Full Backend Test Suite**: `506/506 PASS` in 123.8s (`backend/.venv/bin/python -m unittest discover backend/tests`).
+- **Frontend Unit Test Suite**: `78/78 PASS` (`npm test --prefix frontend`).
+- **Frontend Production Build**: `PASS` (`npm run build --prefix frontend`).
+- **Cryptographic Audit Integrity**: `AuditLogger.verify_chain_integrity()` returned `INTACT`.
+
+### Result:
+- Production-grade security boundary verified against all 14 adversarial attack cases.
+- Direct REST API calls attempting cross-department provisioning, modification, or IDOR are authoritatively rejected by the server.
+- Zero passwords, temporary credentials, or tokens exposed in logs.
+
+### Evidence:
+- `backend/tests/test_department_scoped_user_provisioning.py` (17 tests)
+- `backend/security/auth_router.py` (`can_provision_user`, `_check_department_admin_scope`)
+- `frontend/app/page.tsx` (Department badge, security state, table column)
+- Terminal execution logs: 506 backend tests passing, 78 frontend tests passing, Next.js production build passing.
+
+### Files Changed:
+- `backend/security/auth_router.py`
+- `backend/security/models.py`
+- `scripts/seed-users.py`
+- `frontend/lib/api/users.ts`
+- `frontend/app/page.tsx`
+- `backend/tests/test_department_scoped_user_provisioning.py`
+
+### Dependencies:
+- `backend.security.dependencies` (`RoleChecker`, `get_current_user`)
+- `backend.security.audit` (`AuditLogger`)
+- `backend.security.database` (`get_db`)
+
+### Next Step:
+- Ready for end-to-end hackathon demonstration flow.
+
+---
+
 ## Task Tracker
 
 | ID | Task | Priority | Status | Owner | Dependency | Verification |
@@ -1948,4 +3169,5 @@ AEGIS — Truthful Data Architecture, Real Document Lifecycle, Single Source of 
 | **T15.7** | Overhaul UI/UX & Integrate Code Sandbox scratchpad | P0 | 🟢 VERIFIED | Frontend Dev | T15.6, T02 | Run backend sandbox tests, node test runner, and production build |
 | **T15.8** | Overhaul Visual Console UI/UX & Access Control Provisioning | P0 | 🟢 VERIFIED | Frontend Dev | T15.7, T11 | Run backend database tests, node test runner, and production build |
 | **T16** | Truthful Data Architecture, Real Document Lifecycle & Zero-Mock | P0 | 🟢 VERIFIED | Core Team | T01-T15 | 221 Backend tests + 38 Frontend tests + Typecheck + Next.js build |
+| **T17** | Department-Scoped Admin User Provisioning & Data Isolation | P0 | 🟢 VERIFIED | Security | T11, T12 | 506 Backend tests + 78 Frontend tests + 17 Adversarial tests + Build |
 

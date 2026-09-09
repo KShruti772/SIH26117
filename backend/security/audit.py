@@ -109,6 +109,8 @@ VALID_ACTIONS = {
     "TOOL_EXECUTION_STARTED",
     "TOOL_EXECUTION_COMPLETED",
     "TOOL_EXECUTION_FAILED",
+    "TOOL_EXECUTION_RECOVERED",
+    "TOOL_EVALUATION_SKIPPED",
     "CHAT_REQUEST",
     "CHAT_RESPONSE",
     "VERIFICATION",
@@ -141,9 +143,23 @@ VALID_ACTIONS = {
     "CONVERSATION_MESSAGE_CREATED",
     "CHAT_CONVERSATION_CREATED",
     "CHAT_MESSAGE_CREATED",
+    "PROMPT_EDITED",
+    "PROMPT_EDIT",
+    "PROMPT_COPIED",
     "CONTEXT_RETRIEVED",
     "CONTEXT_TRUNCATED",
-    "TASK_CONTEXT_RESOLVED"
+    "TASK_CONTEXT_RESOLVED",
+
+    # Human-In-The-Loop (HITL) & Approval Actions
+    "APPROVAL_REQUESTED",
+    "APPROVAL_GRANTED",
+    "APPROVAL_MODIFIED",
+    "APPROVAL_REJECTED",
+    "APPROVAL_EXPIRED",
+    "APPROVAL_FAILED",
+    "WAITING_FOR_HUMAN",
+    "APPROVAL_RESUMED",
+    "APPROVAL_RESUME_DENIED"
 }
 
 # Allowed status taxonomy
@@ -275,7 +291,31 @@ ALLOWED_METADATA_KEYS = {
     "duplicate_of",
     "duplicate_detected",
     "canonical_document_id",
-    "timed_out"
+    "timed_out",
+    "approval_id",
+    "reviewer_id",
+    "reviewer_username",
+    "reviewer_role",
+    "approval_status",
+    "rejection_reason",
+    "requester_id",
+    "requester_username",
+    "attempted_plan_id",
+    "bound_plan_id",
+    "user_dept",
+    "req_dept",
+    "review_notes",
+    "reviewer_notes",
+    "resolution",
+    "attempted_by_role",
+    "attempted_by_id",
+    "is_waiting_for_human",
+    "tool",
+    "original_failure",
+    "recovery_strategy",
+    "recovery_result",
+    "necessity",
+    "failed_step"
 }
 
 # Forbidden substring patterns in keys/values (defense in depth)

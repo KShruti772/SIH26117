@@ -1,4 +1,6 @@
-import { apiFetch } from "./client";
+import { apiFetch, ApiError } from "./client";
+import { env } from "../config/env";
+import { getToken } from "../security/token";
 
 export interface RoutingTelemetry {
   task_type?: string;
@@ -36,6 +38,41 @@ export interface SandboxExecutionResult {
   error?: string;
 }
 
+export interface ExecutionEvent {
+  event_type: string;
+  execution_id: string;
+  timestamp: string;
+  session_id?: string;
+  step_id?: number;
+  step_type?: string;
+  message?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface PlanStep {
+  step_id: number;
+  description: string;
+  capability?: string;
+  step_type?: string;
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "SKIPPED";
+  duration_ms?: number;
+  selected_model?: string;
+  verification_state?: string;
+  verification_result?: string;
+  is_replan?: boolean;
+  replan_count?: number;
+  observation?: string;
+  output_summary?: string;
+}
+
+export interface ExecutionPlan {
+  plan_id?: string;
+  goal?: string;
+  status?: string;
+  steps: PlanStep[];
+  final_output?: any;
+}
+
 export interface ChatResponse {
   success: boolean;
   session_id?: string;
@@ -45,6 +82,16 @@ export interface ChatResponse {
   request_id: string;
   duration_ms: number;
   rag_used?: boolean;
+  execution_id?: string;
+  execution_events?: ExecutionEvent[];
+  plan?: ExecutionPlan;
+  plan_id?: string;
+  approval_id?: string;
+  agent_state?: string;
+  is_waiting_for_human?: boolean;
+  artifact?: any;
+  artifacts?: any[];
+  metadata?: Record<string, any>;
   sandbox_execution?: SandboxExecutionResult;
   model_info?: {
     model_id: string;
@@ -67,6 +114,9 @@ export interface ConversationMessage {
   error_detail?: string;
   task_type?: string;
   document_ids?: string[];
+  execution_id?: string;
+  execution_events?: ExecutionEvent[];
+  plan?: ExecutionPlan;
   metadata?: Record<string, any>;
   routing_info?: RoutingTelemetry;
   sandbox_execution?: SandboxExecutionResult;
@@ -81,6 +131,28 @@ export interface ConversationSession {
   updated_at: string;
   last_message_at?: string;
   messages?: ConversationMessage[];
+}
+
+export interface ConversationExecutionStatus {
+  success: boolean;
+  session_id: string;
+  execution_status: string; // "PLANNING" | "EXECUTING" | "VERIFYING" | "WAITING_FOR_HUMAN" | "APPROVED" | "MODIFIED" | "REJECTED" | "COMPLETED" | "FAILED" | "IDLE"
+  approval_id?: string;
+  approval_status?: string;
+  plan_id?: string;
+  agent_state?: string;
+  is_waiting_for_human?: boolean;
+  rejection_reason?: string;
+  has_artifact?: boolean;
+  artifact?: {
+    artifact_id?: string;
+    artifact_name?: string;
+    artifact_path?: string;
+    format?: string;
+    mime_type?: string;
+    download_url?: string;
+  };
+  total_messages: number;
 }
 
 /**
@@ -112,6 +184,14 @@ export const chatApi = {
    */
   async getConversation(sessionId: string): Promise<ConversationSession> {
     return apiFetch<ConversationSession>(`/conversations/${sessionId}`);
+  },
+
+  /**
+   * GET /conversations/{session_id}/execution-status
+   * Retrieves authoritative execution and HITL resolution status for the owned conversation.
+   */
+  async getExecutionStatus(sessionId: string): Promise<ConversationExecutionStatus> {
+    return apiFetch<ConversationExecutionStatus>(`/conversations/${sessionId}/execution-status`);
   },
 
   /**
@@ -153,5 +233,174 @@ export const chatApi = {
       body: JSON.stringify({ message, session_id: sessionId }),
       timeoutMs: 120000,
     });
+  },
+
+  /**
+   * POST /chat/stream
+   * Submits user message query and streams live execution events over SSE.
+   */
+  async sendMessageStream(
+    message: string,
+    sessionId: string | undefined,
+    onEvent: (event: ExecutionEvent) => void
+  ): Promise<ChatResponse> {
+    const url = `${env.apiUrl}/chat/stream`;
+    const token = getToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ message, session_id: sessionId }),
+    });
+
+    if (!response.ok) {
+      let errText = `Request failed with status ${response.status}`;
+      try {
+        const errJson = await response.json();
+        if (errJson.detail) errText = typeof errJson.detail === "string" ? errJson.detail : JSON.stringify(errJson.detail);
+      } catch {}
+      throw new ApiError(errText, response.status);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new ApiError("Streaming response body is not readable", 500);
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResult: ChatResponse | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+            if (data.event) {
+              onEvent(data.event);
+            }
+            if (data.result) {
+              finalResult = data.result;
+            }
+            if (data.error) {
+              throw new ApiError(data.error, 500);
+            }
+          } catch (e) {
+            if (e instanceof ApiError) throw e;
+            console.warn("Failed to parse SSE line:", trimmed, e);
+          }
+        }
+      }
+    }
+
+    if (!finalResult) {
+      throw new ApiError("Stream closed before receiving final execution result", 500);
+    }
+    return finalResult;
+  },
+
+  /**
+   * POST /conversations/{session_id}/messages/{message_id}/edit
+   * Submits an edited prompt for a previous message, preserving history and triggering a new agent execution.
+   */
+  async editPrompt(sessionId: string, messageId: string, message: string, model?: string): Promise<ChatResponse> {
+    return apiFetch<ChatResponse>(`/conversations/${sessionId}/messages/${messageId}/edit`, {
+      method: "POST",
+      body: JSON.stringify({ message, model }),
+      timeoutMs: 120000,
+    });
+  },
+
+  /**
+   * POST /conversations/{session_id}/messages/{message_id}/edit-stream
+   * Submits an edited prompt and streams live execution events over SSE.
+   */
+  async editPromptStream(
+    sessionId: string,
+    messageId: string,
+    message: string,
+    model: string | undefined,
+    onEvent: (event: ExecutionEvent) => void
+  ): Promise<ChatResponse> {
+    const url = `${env.apiUrl}/conversations/${sessionId}/messages/${messageId}/edit-stream`;
+    const token = getToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ message, model }),
+    });
+
+    if (!response.ok) {
+      let errText = `Request failed with status ${response.status}`;
+      try {
+        const errJson = await response.json();
+        if (errJson.detail) errText = typeof errJson.detail === "string" ? errJson.detail : JSON.stringify(errJson.detail);
+      } catch {}
+      throw new ApiError(errText, response.status);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new ApiError("Streaming response body is not readable", 500);
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResult: ChatResponse | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+            if (data.event) {
+              onEvent(data.event);
+            }
+            if (data.result) {
+              finalResult = data.result;
+            }
+            if (data.error) {
+              throw new ApiError(data.error, 500);
+            }
+          } catch (e) {
+            if (e instanceof ApiError) throw e;
+            console.warn("Failed to parse SSE line:", trimmed, e);
+          }
+        }
+      }
+    }
+
+    if (!finalResult) {
+      throw new ApiError("Stream closed before receiving final execution result", 500);
+    }
+    return finalResult;
   }
 };
+

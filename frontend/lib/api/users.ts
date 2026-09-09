@@ -4,6 +4,8 @@ export interface UserProfile {
   id: number;
   username: string;
   role: string;
+  department_id?: number;
+  department_name?: string;
   is_active: boolean;
   must_change_password: boolean;
   created_at: string;

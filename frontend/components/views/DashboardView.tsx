@@ -32,7 +32,7 @@ interface DashboardViewProps {
   conversationCount: number;
   conversationsLoading: boolean;
   recentLogs: AuditLog[];
-  onNavigate: (tab: "chat" | "documents" | "rag" | "models" | "sandbox" | "audit") => void;
+  onNavigate: (tab: "chat" | "documents" | "rag" | "models" | "sandbox" | "approvals" | "audit" | "access" | "settings" | "about") => void;
   onNewConversation: () => void;
   latestMessage?: { content: string; sourceCount?: number };
 }
@@ -223,6 +223,13 @@ export default function DashboardView(props: DashboardViewProps) {
           >
             <div className="aegis-action-grid grid grid-cols-2 gap-3">
               <Button
+                icon={<SafetyCertificateOutlined />}
+                onClick={() => props.onNavigate("approvals")}
+                className="h-12 flex items-center justify-start text-xs border-amber-500/30 text-amber-300 hover:border-amber-400"
+              >
+                Human Approvals
+              </Button>
+              <Button
                 icon={<FileTextOutlined />}
                 onClick={() => props.onNavigate("documents")}
                 className="h-12 flex items-center justify-start text-xs"
@@ -246,7 +253,7 @@ export default function DashboardView(props: DashboardViewProps) {
               <Button
                 icon={<RobotOutlined />}
                 onClick={() => props.onNavigate("models")}
-                className="h-12 flex items-center justify-start text-xs"
+                className="h-12 flex items-center justify-start text-xs col-span-2 sm:col-span-1"
               >
                 Manage models
               </Button>

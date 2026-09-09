@@ -211,3 +211,112 @@ test("Role-Aware Navigation Visibility - User role hides Audit logs", () => {
   assert.strictEqual(hasAudit, false);
   assert.strictEqual(filtered.length, 3);
 });
+
+// ==========================================
+// Persistent Navigation Menu State Tests
+// ==========================================
+
+class NavigationStateManager {
+  constructor(isMobile = false) {
+    this.isMobile = isMobile;
+    this.desktopNavOpen = false;
+    this.mobileNavOpen = false;
+    this.activeTab = "dashboard";
+  }
+
+  toggleMenu() {
+    if (this.isMobile) {
+      this.mobileNavOpen = !this.mobileNavOpen;
+    } else {
+      this.desktopNavOpen = !this.desktopNavOpen;
+    }
+  }
+
+  navigate(tab) {
+    this.activeTab = tab;
+    if (this.isMobile) {
+      this.mobileNavOpen = false;
+    }
+  }
+
+  get isMenuOpen() {
+    return this.isMobile ? this.mobileNavOpen : this.desktopNavOpen;
+  }
+
+  get ariaAttributes() {
+    return {
+      "aria-label": this.isMenuOpen ? "Close navigation menu" : "Open navigation menu",
+      "aria-expanded": this.isMenuOpen,
+      "aria-controls": "aegis-navigation-menu",
+      title: this.isMenuOpen ? "Close navigation menu" : "Open navigation menu"
+    };
+  }
+}
+
+test("Navigation Persistence - Desktop menu opens and closes on explicit toggle", () => {
+  const nav = new NavigationStateManager(false);
+  assert.strictEqual(nav.isMenuOpen, false);
+
+  nav.toggleMenu();
+  assert.strictEqual(nav.isMenuOpen, true);
+
+  nav.toggleMenu();
+  assert.strictEqual(nav.isMenuOpen, false);
+});
+
+test("Navigation Persistence - Desktop menu remains OPEN across client-side workspace changes", () => {
+  const nav = new NavigationStateManager(false);
+  nav.toggleMenu(); // Open menu
+  assert.strictEqual(nav.isMenuOpen, true);
+
+  // Navigate across multiple workspaces
+  nav.navigate("chat");
+  assert.strictEqual(nav.activeTab, "chat");
+  assert.strictEqual(nav.isMenuOpen, true, "Menu must remain open when navigating to Assistant");
+
+  nav.navigate("rag");
+  assert.strictEqual(nav.activeTab, "rag");
+  assert.strictEqual(nav.isMenuOpen, true, "Menu must remain open when navigating to Knowledge Base");
+
+  nav.navigate("documents");
+  assert.strictEqual(nav.activeTab, "documents");
+  assert.strictEqual(nav.isMenuOpen, true, "Menu must remain open when navigating to Documents");
+
+  nav.navigate("approvals");
+  assert.strictEqual(nav.activeTab, "approvals");
+  assert.strictEqual(nav.isMenuOpen, true, "Menu must remain open when navigating to Approvals");
+
+  // Explicit user close
+  nav.toggleMenu();
+  assert.strictEqual(nav.isMenuOpen, false, "Menu must close only when explicitly toggled");
+
+  // Navigation while closed maintains closed state
+  nav.navigate("dashboard");
+  assert.strictEqual(nav.isMenuOpen, false, "Menu must stay closed during navigation when user closed it");
+});
+
+test("Navigation Persistence - Mobile drawer closes upon selecting workspace", () => {
+  const nav = new NavigationStateManager(true); // Mobile
+  nav.toggleMenu(); // Open mobile drawer
+  assert.strictEqual(nav.isMenuOpen, true);
+
+  // Selecting a workspace on mobile closes drawer
+  nav.navigate("chat");
+  assert.strictEqual(nav.activeTab, "chat");
+  assert.strictEqual(nav.isMenuOpen, false, "Mobile drawer must close upon selecting a destination");
+});
+
+test("Navigation Accessibility - Header button reflects aria-expanded and aria-controls", () => {
+  const nav = new NavigationStateManager(false);
+  let attrs = nav.ariaAttributes;
+  assert.strictEqual(attrs["aria-expanded"], false);
+  assert.strictEqual(attrs["aria-controls"], "aegis-navigation-menu");
+  assert.strictEqual(attrs["aria-label"], "Open navigation menu");
+
+  nav.toggleMenu();
+  attrs = nav.ariaAttributes;
+  assert.strictEqual(attrs["aria-expanded"], true);
+  assert.strictEqual(attrs["aria-controls"], "aegis-navigation-menu");
+  assert.strictEqual(attrs["aria-label"], "Close navigation menu");
+});
+

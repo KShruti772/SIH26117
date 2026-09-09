@@ -67,14 +67,11 @@ export default function KnowledgeBaseView(p: KnowledgeBaseViewProps) {
 
   const handleDownloadGenerated = async (doc: GeneratedDocument) => {
     try {
-      const token = getToken();
-      const response = await fetch(`${env.apiUrl}/documents/generated/${doc.id}/download`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-      if (!response.ok) throw new Error("Download failed");
-      const url = window.URL.createObjectURL(await response.blob());
-      const anchor = document.createElement("a");
-      anchor.href = url; anchor.download = doc.filename; document.body.appendChild(anchor); anchor.click();
-      window.URL.revokeObjectURL(url); document.body.removeChild(anchor); message.success(`Downloaded ${doc.filename}`);
-    } catch (error: unknown) { message.error(error instanceof Error ? error.message : "Failed downloading generated document."); }
+      await ragApi.downloadGeneratedDocument(doc.id, doc.filename);
+      message.success(`Downloaded '${doc.filename}'`);
+    } catch (error: unknown) {
+      message.error(error instanceof Error ? error.message : "Failed downloading generated document.");
+    }
   };
 
   const displayResult = React.useMemo<DisplayResult | null>(() => {

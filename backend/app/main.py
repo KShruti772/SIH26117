@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Any, List, Dict
 import uuid
@@ -18,6 +18,7 @@ from backend.security.access_control import (
 )
 from pydantic import BaseModel, Field, model_validator
 import os
+import json
 import sqlite3
 
 from backend.models.registry.manager import ModelRegistryManager
@@ -74,6 +75,19 @@ doc_generators = {
     "pdf": pdf_generator
 }
 
+from backend.services.approval_service import (
+    ApprovalService,
+    ApprovalError,
+    ApprovalNotFoundError,
+    ApprovalAuthorizationError,
+    InvalidStateTransitionError,
+    ApprovalValidationError,
+    AUTHORIZED_REVIEWER_ROLES
+)
+from backend.security.models import ApprovalStatus, ApprovalActionType
+
+approval_service = ApprovalService()
+
 agent_controller = AgentController(
     registry_manager=registry_manager,
     loader_manager=loader_manager,
@@ -81,7 +95,9 @@ agent_controller = AgentController(
     sandbox_service=sandbox_service,
     doc_generators=doc_generators,
     model_router=model_router,
-    verify_callback=verify_callback
+    verify_callback=verify_callback,
+    approval_service=approval_service,
+    enable_hitl=True
 )
 
 app = FastAPI(
@@ -121,6 +137,8 @@ class ChatRequest(BaseModel):
     message: Optional[str] = Field(default=None, max_length=1000)
     query: Optional[str] = Field(default=None, max_length=1000)
     session_id: Optional[str] = None
+    model: Optional[str] = None
+    edited_from_message_id: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_content(self):
@@ -318,6 +336,158 @@ async def get_conversation_messages(session_id: str, current_user = Depends(get_
         
     return ConversationManager.get_messages(session_id)
 
+@app.get("/conversations/{session_id}/execution-status", tags=["Conversation Operations"])
+@app.get("/api/conversations/{session_id}/execution-status", tags=["Conversation Operations"])
+async def get_conversation_execution_status(session_id: str, current_user = Depends(get_current_user)):
+    """
+    Authenticated requester execution-status endpoint.
+    Derives user identity directly from the authenticated JWT.
+    Enforces strict conversation session ownership:
+      - Requester/owner retrieves 200 with authoritative execution state.
+      - Other users (non-admins) receive 403 Forbidden.
+    """
+    from backend.agents.conversations import ConversationManager, validate_session_id
+    from backend.security.database import get_db_path
+    import sqlite3
+
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    conv = ConversationManager.get_conversation(session_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+
+    user_attrs = _extract_user_attrs(current_user)
+    curr_id = user_attrs.get("id")
+    curr_username = user_attrs.get("username")
+    curr_role = user_attrs.get("role", "user")
+    is_admin = user_attrs.get("is_admin", False) or curr_role == "admin"
+
+    owner_id = conv.get("user_id")
+    owner_username = conv.get("username")
+
+    if not is_admin and (
+        (owner_id is not None and str(owner_id) != str(curr_id)) or
+        (owner_id is None and owner_username and owner_username != curr_username)
+    ):
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=session_id,
+            metadata={
+                "reason": "CONVERSATION_EXECUTION_STATUS_OWNERSHIP_FORBIDDEN",
+                "session_id": session_id,
+                "owner_id": owner_id,
+                "operation": "get_conversation_execution_status"
+            }
+        )
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this conversation session.")
+
+    # 1. Query latest approval request record bound to this conversation
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    approval_rec = None
+    doc_rec = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, status, plan_id, requester_id, requester_username, reviewer_id, reviewer_username, rejection_reason, created_at, reviewed_at
+            FROM approval_requests
+            WHERE conversation_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            approval_rec = dict(row)
+
+        # Check generated_documents for compiled deliverables
+        cursor.execute(
+            """
+            SELECT id, filename, format, mime_type, file_path, created_at
+            FROM generated_documents
+            WHERE conversation_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (session_id,)
+        )
+        drow = cursor.fetchone()
+        if drow:
+            doc_rec = dict(drow)
+    finally:
+        conn.close()
+
+    # 2. Inspect latest message in conversation
+    messages = conv.get("messages", [])
+    last_msg = messages[-1] if messages else None
+    last_meta = last_msg.get("metadata", {}) if last_msg else {}
+
+    approval_id = approval_rec.get("id") if approval_rec else None
+    approval_status = approval_rec.get("status") if approval_rec else None
+    plan_id = approval_rec.get("plan_id") if approval_rec else None
+    rejection_reason = approval_rec.get("rejection_reason") if approval_rec else None
+
+    agent_state = last_meta.get("agent_state")
+    is_waiting_for_human = bool(
+        last_meta.get("is_waiting_for_human") or
+        approval_status == "WAITING_FOR_HUMAN"
+    )
+
+    # 3. Artifact resolution
+    artifact = last_meta.get("artifact")
+    if not artifact and doc_rec:
+        artifact = {
+            "artifact_id": doc_rec["id"],
+            "artifact_name": doc_rec["filename"],
+            "format": doc_rec["format"],
+            "mime_type": doc_rec["mime_type"],
+            "artifact_path": doc_rec["file_path"],
+            "download_url": f"/documents/generated/{doc_rec['id']}/download"
+        }
+
+    # 4. Authoritative execution status determination
+    if approval_status == "REJECTED" or agent_state == "REJECTED":
+        execution_status = "REJECTED"
+        is_waiting_for_human = False
+    elif agent_state == "COMPLETED" or (artifact and last_msg and last_msg.get("role") == "assistant"):
+        execution_status = "COMPLETED"
+        is_waiting_for_human = False
+    elif approval_status in ("APPROVED", "MODIFIED"):
+        execution_status = "APPROVED"
+        is_waiting_for_human = False
+    elif approval_status == "WAITING_FOR_HUMAN" or is_waiting_for_human:
+        execution_status = "WAITING_FOR_HUMAN"
+        is_waiting_for_human = True
+    elif agent_state == "FAILED":
+        execution_status = "FAILED"
+        is_waiting_for_human = False
+    else:
+        execution_status = "IDLE"
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "execution_status": execution_status,
+        "approval_id": approval_id,
+        "approval_status": approval_status,
+        "plan_id": plan_id,
+        "agent_state": agent_state,
+        "is_waiting_for_human": is_waiting_for_human,
+        "rejection_reason": rejection_reason,
+        "has_artifact": bool(artifact),
+        "artifact": artifact,
+        "total_messages": len(messages)
+    }
+
 @app.delete("/conversations/{session_id}", tags=["Conversation Operations"])
 async def delete_conversation(session_id: str, current_user = Depends(get_current_user)):
     """Permanently removes a saved conversation session and cascading messages."""
@@ -403,9 +573,252 @@ async def post_conversation_message(
     )
     return await run_chat(chat_req, current_user=current_user)
 
-@app.post("/chat", tags=["Agent Operations"])
-async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user)):
-    """Runs a multi-step sovereign agent query using local models, sandboxes, and verifiers."""
+class EditPromptRequest(BaseModel):
+    message: Optional[str] = Field(default=None, max_length=1000)
+    query: Optional[str] = Field(default=None, max_length=1000)
+    model: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_content(self):
+        msg = self.message if self.message is not None else self.query
+        if msg is None or len(msg.strip()) == 0:
+            raise ValueError("Prompt message or query must not be empty.")
+        if len(msg) > 1000:
+            raise ValueError("Prompt exceeds maximum length of 1000 characters.")
+        return self
+
+@app.post("/conversations/{session_id}/messages/{message_id}/edit", tags=["Conversation Operations"])
+async def edit_conversation_message(
+    session_id: str,
+    message_id: str,
+    payload: EditPromptRequest,
+    current_user = Depends(get_current_user)
+):
+    """Edits a previous user prompt in a conversation session, preserving history and creating a new execution."""
+    from backend.agents.conversations import validate_session_id, ConversationManager
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+    curr_role = _get_user_val(current_user, "role")
+    is_admin = curr_role == "admin"
+
+    # 1. Ownership validation
+    conv_owner = ConversationManager.get_conversation_owner(session_id)
+    if not conv_owner:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+
+    owner_id = conv_owner.get("user_id")
+    owner_username = conv_owner.get("username")
+    if not is_admin and (
+        (owner_id is not None and owner_id != curr_id) or
+        (owner_id is None and owner_username and owner_username != curr_username)
+    ):
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=session_id,
+            metadata={
+                "reason": "RESOURCE_OWNERSHIP_FORBIDDEN",
+                "session_id": session_id,
+                "message_id": message_id,
+                "owner_id": owner_id,
+                "operation": "edit_prompt"
+            }
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=session_id,
+            metadata={
+                "reason": "RESOURCE_OWNERSHIP_FORBIDDEN",
+                "session_id": session_id,
+                "message_id": message_id,
+                "owner_id": owner_id,
+                "operation": "edit_prompt"
+            }
+        )
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this conversation session.")
+
+    # 2. Target message existence and role check
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, role, content FROM messages WHERE id = ? AND conversation_id = ?", (message_id, session_id))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Message not found in this conversation session.")
+        if row["role"] != "user":
+            raise HTTPException(status_code=400, detail="Only user prompt messages can be edited.")
+    finally:
+        conn.close()
+
+    # 3. Log PROMPT_EDITED audit event with safe metadata
+    req_id = get_request_id() or f"REQ-{uuid.uuid4().hex[:8]}"
+    AuditLogger.log_event(
+        action="PROMPT_EDITED",
+        component="app.main",
+        status="success",
+        user_id=curr_id,
+        username=curr_username,
+        role=curr_role,
+        resource=session_id,
+        request_id=req_id,
+        metadata={
+            "session_id": session_id,
+            "original_message_id": message_id,
+            "requester_id": curr_id,
+            "request_id": req_id
+        }
+    )
+
+    msg_text = payload.message if payload.message is not None else payload.query
+    chat_req = ChatRequest(
+        message=msg_text,
+        session_id=session_id,
+        model=payload.model,
+        edited_from_message_id=message_id
+    )
+    return await _run_chat_impl(chat_req, current_user=current_user)
+
+@app.post("/conversations/{session_id}/messages/{message_id}/edit-stream", tags=["Conversation Operations"])
+async def edit_conversation_message_stream(
+    session_id: str,
+    message_id: str,
+    payload: EditPromptRequest,
+    current_user = Depends(get_current_user)
+):
+    """Edits a previous user prompt in a conversation session and streams execution events over SSE."""
+    import asyncio
+    from backend.agents.conversations import validate_session_id, ConversationManager
+    try:
+        session_id = validate_session_id(session_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    curr_id = _get_user_val(current_user, "id")
+    curr_username = _get_user_val(current_user, "username")
+    curr_role = _get_user_val(current_user, "role")
+    is_admin = curr_role == "admin"
+
+    # 1. Ownership validation
+    conv_owner = ConversationManager.get_conversation_owner(session_id)
+    if not conv_owner:
+        raise HTTPException(status_code=404, detail="Conversation session not found.")
+
+    owner_id = conv_owner.get("user_id")
+    owner_username = conv_owner.get("username")
+    if not is_admin and (
+        (owner_id is not None and owner_id != curr_id) or
+        (owner_id is None and owner_username and owner_username != curr_username)
+    ):
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="app.main",
+            status="failure",
+            user_id=curr_id,
+            username=curr_username,
+            role=curr_role,
+            resource=session_id,
+            metadata={
+                "reason": "RESOURCE_OWNERSHIP_FORBIDDEN",
+                "session_id": session_id,
+                "message_id": message_id,
+                "owner_id": owner_id,
+                "operation": "edit_prompt_stream"
+            }
+        )
+        raise HTTPException(status_code=403, detail="Access denied. You do not own this conversation session.")
+
+    # 2. Target message existence and role check
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, role, content FROM messages WHERE id = ? AND conversation_id = ?", (message_id, session_id))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Message not found in this conversation session.")
+        if row["role"] != "user":
+            raise HTTPException(status_code=400, detail="Only user prompt messages can be edited.")
+    finally:
+        conn.close()
+
+    # 3. Log PROMPT_EDITED audit event with safe metadata
+    req_id = get_request_id() or f"REQ-{uuid.uuid4().hex[:8]}"
+    AuditLogger.log_event(
+        action="PROMPT_EDITED",
+        component="app.main",
+        status="success",
+        user_id=curr_id,
+        username=curr_username,
+        role=curr_role,
+        resource=session_id,
+        request_id=req_id,
+        metadata={
+            "session_id": session_id,
+            "original_message_id": message_id,
+            "requester_id": curr_id,
+            "request_id": req_id
+        }
+    )
+
+    msg_text = payload.message if payload.message is not None else payload.query
+    chat_req = ChatRequest(
+        message=msg_text,
+        session_id=session_id,
+        model=payload.model,
+        edited_from_message_id=message_id
+    )
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def event_cb(evt: Dict[str, Any]):
+        await queue.put({"type": "event", "event": evt})
+
+    async def stream_generator():
+        async def run_task():
+            try:
+                result = await _run_chat_impl(chat_req, current_user=current_user, event_callback=event_cb)
+                await queue.put({"type": "done", "result": result})
+            except Exception as exc:
+                await queue.put({"type": "error", "error": str(exc)})
+
+        task = asyncio.create_task(run_task())
+        while True:
+            msg = await queue.get()
+            if msg["type"] == "event":
+                yield f"data: {json.dumps({'event': msg['event']})}\n\n"
+            elif msg["type"] == "done":
+                yield f"data: {json.dumps({'result': msg['result'], 'done': True})}\n\n"
+                break
+            elif msg["type"] == "error":
+                yield f"data: {json.dumps({'error': msg['error'], 'done': True})}\n\n"
+                break
+        await task
+
+    return StreamingResponse(stream_generator(), media_type="text/event-stream")
+
+async def _run_chat_impl(
+    payload: ChatRequest,
+    current_user: Any,
+    event_callback: Optional[Any] = None
+) -> Dict[str, Any]:
+    """Core execution engine for sovereign agent multi-step query with local models, sandboxes, and verifiers."""
     from fastapi import HTTPException
     from backend.agents.conversations import ConversationManager, validate_session_id
     from backend.models.router import classify_task_from_prompt
@@ -470,8 +883,17 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             role=curr_role,
             resource=session_id,
             request_id=req_id,
-            metadata={"session_id": session_id, "prompt_length": len(user_prompt), "task_type": task_type}
+            metadata={
+                "session_id": session_id,
+                "prompt_length": len(user_prompt),
+                "task_type": task_type,
+                "is_edit": bool(payload.edited_from_message_id)
+            }
         )
+
+        user_meta = {"task_type": task_type}
+        if payload.edited_from_message_id:
+            user_meta["edited_from_message_id"] = payload.edited_from_message_id
 
         # Persist user prompt to local database session with user identity
         ConversationManager.add_message(
@@ -481,7 +903,7 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             user_id=curr_user_id,
             username=curr_username,
             request_id=req_id,
-            metadata={"task_type": task_type}
+            metadata=user_meta
         )
         
         recent_messages = ConversationManager.get_messages(session_id)[:-1]
@@ -490,7 +912,12 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             for message in recent_messages[-6:]
             if message.get("content", "").strip()
         ]
-        res = await agent_controller.run(user_prompt, current_user=current_user, conversation_id=session_id)
+        res = await agent_controller.run(
+            user_prompt,
+            current_user=current_user,
+            conversation_id=session_id,
+            event_callback=event_callback
+        )
         
         is_rag = res.get("rag_used", False)
         sources = res.get("sources", [])
@@ -554,6 +981,9 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             "replan_count": last_step_replans
         }
 
+        execution_id = res.get("execution_id")
+        execution_events = res.get("execution_events", [])
+
         assistant_meta = {
             "task_type": task_type,
             "selected_model": selected_model,
@@ -569,7 +999,16 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             "execution": execution_data,
             "replan_count": execution_data.get("replan_count", 0),
             "context_telemetry": res.get("context_telemetry"),
-            "context_package": res.get("context_package")
+            "context_package": res.get("context_package"),
+            "execution_id": execution_id,
+            "execution_events": execution_events,
+            "plan": res.get("plan"),
+            "approval_id": res.get("approval_id"),
+            "plan_id": res.get("plan_id") or (res.get("plan", {}).get("plan_id") if isinstance(res.get("plan"), dict) else None),
+            "agent_state": res.get("status") if res.get("status") in ("WAITING_FOR_HUMAN", "COMPLETED", "REJECTED", "MODIFIED", "APPROVED") else ("COMPLETED" if res.get("success") else "FAILED"),
+            "is_waiting_for_human": res.get("status") == "WAITING_FOR_HUMAN",
+            "artifact": res.get("artifact"),
+            "artifacts": res.get("artifacts") or ([res.get("artifact")] if res.get("artifact") else [])
         }
 
         # Persist assistant output to local database session
@@ -603,13 +1042,14 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
                 "session_id": session_id,
                 "model_id": selected_model,
                 "rag_used": is_rag,
-                "verification": verification
+                "verification": verification,
+                "execution_id": execution_id
             }
         )
 
         return {
             "success": res.get("success", False),
-            "status": "success" if res.get("success") else "failure",
+            "status": res.get("status") or ("success" if res.get("success") else "failure"),
             "category": res.get("category"),
             "model": selected_model,
             "answer": answer,
@@ -619,13 +1059,20 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             "plan": res.get("plan"),
             "state": res.get("state"),
             "execution": execution_data,
+            "execution_id": execution_id,
+            "execution_events": execution_events,
             "verification": verification,
             "request_id": req_id,
             "duration_ms": res.get("duration_ms"),
             "sandbox_execution": sandbox_exec,
+            "approval_id": res.get("approval_id"),
+            "plan_id": res.get("plan_id") or (res.get("plan", {}).get("plan_id") if isinstance(res.get("plan"), dict) else None),
+            "artifact": res.get("artifact"),
+            "artifacts": res.get("artifacts") or ([res.get("artifact")] if res.get("artifact") else []),
+            "metadata": assistant_meta,
             "model_info": {
                 "model_id": selected_model,
-                "inference_mode": "real" if res.get("success") else "unavailable"
+                "inference_mode": "real" if res.get("success") or res.get("status") == "WAITING_FOR_HUMAN" else "unavailable"
             },
             "routing_info": {
                 "task_type": task_type,
@@ -646,6 +1093,43 @@ async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user
             status_code=500,
             detail=f"The sovereign node encountered an unexpected fault during agent execution: {e}"
         )
+
+@app.post("/chat", tags=["Agent Operations"])
+async def run_chat(payload: ChatRequest, current_user = Depends(get_current_user)):
+    """Runs a multi-step sovereign agent query using local models, sandboxes, and verifiers."""
+    return await _run_chat_impl(payload, current_user=current_user)
+
+@app.post("/chat/stream", tags=["Agent Operations"])
+async def run_chat_stream(payload: ChatRequest, current_user = Depends(get_current_user)):
+    """Streams live agent execution events and final response over SSE."""
+    import asyncio
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def event_cb(evt: Dict[str, Any]):
+        await queue.put({"type": "event", "event": evt})
+
+    async def stream_generator():
+        async def run_task():
+            try:
+                result = await _run_chat_impl(payload, current_user=current_user, event_callback=event_cb)
+                await queue.put({"type": "done", "result": result})
+            except Exception as exc:
+                await queue.put({"type": "error", "error": str(exc)})
+
+        task = asyncio.create_task(run_task())
+        while True:
+            msg = await queue.get()
+            if msg["type"] == "event":
+                yield f"data: {json.dumps({'event': msg['event']})}\n\n"
+            elif msg["type"] == "done":
+                yield f"data: {json.dumps({'result': msg['result'], 'done': True})}\n\n"
+                break
+            elif msg["type"] == "error":
+                yield f"data: {json.dumps({'error': msg['error'], 'done': True})}\n\n"
+                break
+        await task
+
+    return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
 
 @app.get("/audit", tags=["System Audit"])
@@ -1422,6 +1906,7 @@ async def preview_document(id: str, current_user = Depends(get_current_user)):
     return FileResponse(source_path, media_type=mime_type, filename=doc_info.get("filename"))
 
 @app.get("/documents/{id}/download", tags=["RAG Operations"])
+@app.get("/api/documents/{id}/download", tags=["RAG Operations"])
 async def download_uploaded_document(id: str, current_user = Depends(get_current_user)):
     """Downloads the document file with access control check and audit logging."""
     doc_info = _resolve_document_info(id, current_user)
@@ -1604,6 +2089,7 @@ async def list_generated_documents(current_user = Depends(get_current_user)):
     return grounded_qa_service.doc_generator.list_generated_documents(current_user=current_user)
 
 @app.get("/documents/generated/{id}/download", tags=["Document Generation"])
+@app.get("/api/documents/generated/{id}/download", tags=["Document Generation"])
 async def download_generated_document(id: str, current_user = Depends(get_current_user)):
     """Streams the physical generated PDF or DOCX file with verified authorization."""
     from fastapi.responses import FileResponse
@@ -1686,6 +2172,381 @@ async def delete_generated_document(id: str, current_user = Depends(get_current_
 
     grounded_qa_service.doc_generator.delete_generated_document(id)
     return {"status": "success", "id": id, "message": "Generated document removed."}
+
+# =========================================================================
+# Human-In-The-Loop (HITL) Approvals REST API
+# =========================================================================
+
+class ApprovalDecisionRequest(BaseModel):
+    comment: Optional[str] = Field(default=None, max_length=1000)
+
+class ApprovalModifyRequest(BaseModel):
+    modifications: Optional[Dict[str, Any]] = None
+    revised_text: Optional[str] = Field(default=None, max_length=5000)
+    comment: Optional[str] = Field(default=None, max_length=1000)
+
+class ApprovalRejectRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=1000)
+
+class ApprovalResumeRequest(BaseModel):
+    conversation_id: Optional[str] = None
+
+
+def _format_approval_item(req: Dict[str, Any]) -> Dict[str, Any]:
+    """Extracts safe, decision-relevant metadata without leaking raw secrets or sensitive tokens."""
+    proposed = {}
+    if req.get("proposed_payload_json"):
+        try:
+            proposed = json.loads(req["proposed_payload_json"]) if isinstance(req["proposed_payload_json"], str) else req["proposed_payload_json"]
+        except Exception:
+            proposed = {}
+
+    summary = proposed.get("summary") or f"Approval request for plan {req.get('plan_id', 'unknown')}"
+
+    return {
+        "id": req.get("id"),
+        "approval_id": req.get("id"),
+        "action_type": req.get("action_type"),
+        "status": req.get("status"),
+        "plan_id": req.get("plan_id"),
+        "step_id": req.get("step_id"),
+        "conversation_id": req.get("conversation_id"),
+        "requester_id": req.get("requester_id"),
+        "requester_username": req.get("requester_username"),
+        "reviewer_id": req.get("reviewer_id"),
+        "reviewer_username": req.get("reviewer_username"),
+        "reviewer_role": req.get("reviewer_role"),
+        "department_id": req.get("department_id"),
+        "department_name": req.get("department_name"),
+        "created_at": req.get("created_at"),
+        "reviewed_at": req.get("reviewed_at"),
+        "expires_at": req.get("expires_at"),
+        "summary": summary,
+        "target_format": proposed.get("target_format", "docx"),
+        "findings_preview": proposed.get("findings", "")[:500] if proposed.get("findings") else None,
+        "calculations_preview": proposed.get("calculations", "")[:300] if proposed.get("calculations") else None,
+        "rejection_reason": req.get("rejection_reason")
+    }
+
+
+@app.get("/api/approvals/pending", tags=["Human-in-the-Loop Approvals"])
+@app.get("/api/approvals", tags=["Human-in-the-Loop Approvals"])
+async def list_pending_approvals(
+    status: Optional[str] = "WAITING_FOR_HUMAN",
+    department_id: Optional[int] = None,
+    limit: int = 50,
+    current_user = Depends(get_current_user)
+):
+    """
+    Returns approval requests visible to the authenticated reviewer.
+    Enforces RBAC reviewer roles and strict department isolation.
+    """
+    user_attrs = _extract_user_attrs(current_user)
+    role = (user_attrs.get("role") or "user").lower()
+    is_admin = user_attrs.get("is_admin", False)
+    user_dept_id = user_attrs.get("department_id")
+
+    if not is_admin and role not in AUTHORIZED_REVIEWER_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Operation not permitted for this user role. Reviewer privileges required."
+        )
+
+    # Department Isolation: non-admin reviewers are restricted to their assigned department
+    target_dept_id = department_id if is_admin else user_dept_id
+
+    bounded_limit = min(max(1, limit), 100)
+    requests = approval_service.list_requests(
+        department_id=target_dept_id,
+        status=status if status else None,
+        limit=bounded_limit
+    )
+
+    formatted = [_format_approval_item(r) for r in requests]
+    return {
+        "success": True,
+        "total": len(formatted),
+        "approvals": formatted
+    }
+
+
+@app.get("/api/approvals/{approval_id}", tags=["Human-in-the-Loop Approvals"])
+async def get_approval_details(
+    approval_id: str,
+    current_user = Depends(get_current_user)
+):
+    """
+    Retrieves full details of an approval request with sanitized payloads.
+    Validates reviewer authorization or requester self-inspection.
+    """
+    user_attrs = _extract_user_attrs(current_user)
+    user_id = user_attrs.get("id")
+    role = (user_attrs.get("role") or "user").lower()
+    is_admin = user_attrs.get("is_admin", False)
+    user_dept_id = user_attrs.get("department_id")
+
+    req = approval_service.get_request(approval_id)
+    if not req:
+        raise HTTPException(status_code=404, detail=f"Approval request '{approval_id}' was not found.")
+
+    req_requester_id = req.get("requester_id")
+    req_dept_id = req.get("department_id")
+
+    # Access check: Admin, or Reviewer within the same department
+    is_authorized_reviewer = (role in AUTHORIZED_REVIEWER_ROLES)
+
+    if not is_admin:
+        if not is_authorized_reviewer:
+            raise HTTPException(
+                status_code=403,
+                detail="Operation not permitted for this user role. Reviewer privileges required."
+            )
+        if req_dept_id is not None and user_dept_id is not None and int(req_dept_id) != int(user_dept_id):
+            raise HTTPException(status_code=403, detail="Access denied: cross-department approval access is prohibited.")
+
+    # Parse payloads safely
+    proposed_payload = {}
+    if req.get("proposed_payload_json"):
+        try:
+            proposed_payload = json.loads(req["proposed_payload_json"]) if isinstance(req["proposed_payload_json"], str) else req["proposed_payload_json"]
+        except Exception:
+            proposed_payload = {}
+
+    modified_payload = None
+    if req.get("modified_payload_json"):
+        try:
+            modified_payload = json.loads(req["modified_payload_json"]) if isinstance(req["modified_payload_json"], str) else req["modified_payload_json"]
+        except Exception:
+            modified_payload = {"notes": str(req.get("modified_payload_json"))}
+
+    summary = proposed_payload.get("summary") or f"Approval request for plan {req.get('plan_id', 'unknown')}"
+
+    return {
+        "success": True,
+        "approval": {
+            "id": req.get("id"),
+            "approval_id": req.get("id"),
+            "action_type": req.get("action_type"),
+            "status": req.get("status"),
+            "plan_id": req.get("plan_id"),
+            "step_id": req.get("step_id"),
+            "conversation_id": req.get("conversation_id"),
+            "requester_id": req.get("requester_id"),
+            "requester_username": req.get("requester_username"),
+            "reviewer_id": req.get("reviewer_id"),
+            "reviewer_username": req.get("reviewer_username"),
+            "reviewer_role": req.get("reviewer_role"),
+            "department_id": req.get("department_id"),
+            "department_name": req.get("department_name"),
+            "created_at": req.get("created_at"),
+            "reviewed_at": req.get("reviewed_at"),
+            "expires_at": req.get("expires_at"),
+            "summary": summary,
+            "proposed_payload": proposed_payload,
+            "modified_payload": modified_payload,
+            "rejection_reason": req.get("rejection_reason")
+        }
+    }
+
+
+@app.post("/api/approvals/{approval_id}/approve", tags=["Human-in-the-Loop Approvals"])
+async def approve_request(
+    approval_id: str,
+    payload: Optional[ApprovalDecisionRequest] = None,
+    current_user = Depends(get_current_user)
+):
+    """
+    Approves a pending HITL request and resumes agent controller execution.
+    Enforces RBAC reviewer role, department boundary, segregation of duties, and state transition validity.
+    """
+    try:
+        updated_req = approval_service.approve(approval_id=approval_id, reviewer=current_user)
+    except ApprovalNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ApprovalAuthorizationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except InvalidStateTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ApprovalValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logging.getLogger("aegis.app").error(f"Unexpected error approving request {approval_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during approval processing.")
+
+    # Resume agent controller execution
+    plan_id = updated_req.get("plan_id")
+    conv_id = updated_req.get("conversation_id")
+    resume_res = await agent_controller.resume_execution(
+        plan_id=plan_id,
+        approval_id=approval_id,
+        current_user=current_user,
+        conversation_id=conv_id
+    )
+
+    return {
+        "success": True,
+        "approval_id": approval_id,
+        "status": ApprovalStatus.APPROVED.value,
+        "message": "Approval granted and execution resumed successfully.",
+        "execution": resume_res
+    }
+
+
+@app.post("/api/approvals/{approval_id}/modify", tags=["Human-in-the-Loop Approvals"])
+async def modify_request(
+    approval_id: str,
+    payload: ApprovalModifyRequest,
+    current_user = Depends(get_current_user)
+):
+    """
+    Modifies a pending HITL request with reviewer constraints and resumes replanned execution.
+    Enforces RBAC reviewer role, department boundary, segregation of duties, and state transition validity.
+    """
+    mod_data: Dict[str, Any] = {}
+    if payload.modifications and isinstance(payload.modifications, dict):
+        mod_data.update(payload.modifications)
+    if payload.revised_text:
+        mod_data["revised_text"] = payload.revised_text
+    if payload.comment:
+        mod_data["comment"] = payload.comment
+    if not mod_data:
+        mod_data = {"notes": "Reviewer modified approval request."}
+
+    try:
+        updated_req = approval_service.modify(
+            approval_id=approval_id,
+            reviewer=current_user,
+            modified_payload=mod_data
+        )
+    except ApprovalNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ApprovalAuthorizationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except InvalidStateTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ApprovalValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logging.getLogger("aegis.app").error(f"Unexpected error modifying request {approval_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during modification processing.")
+
+    # Resume agent controller execution with reviewer constraints injected into replanning
+    plan_id = updated_req.get("plan_id")
+    conv_id = updated_req.get("conversation_id")
+    resume_res = await agent_controller.resume_execution(
+        plan_id=plan_id,
+        approval_id=approval_id,
+        current_user=current_user,
+        conversation_id=conv_id
+    )
+
+    return {
+        "success": True,
+        "approval_id": approval_id,
+        "status": ApprovalStatus.MODIFIED.value,
+        "message": "Approval modified with reviewer constraints and execution resumed.",
+        "execution": resume_res
+    }
+
+
+@app.post("/api/approvals/{approval_id}/reject", tags=["Human-in-the-Loop Approvals"])
+async def reject_request(
+    approval_id: str,
+    payload: ApprovalRejectRequest,
+    current_user = Depends(get_current_user)
+):
+    """
+    Rejects a pending HITL request and halts agent execution without deliverable publication.
+    Enforces RBAC reviewer role, department boundary, segregation of duties, and state transition validity.
+    """
+    try:
+        updated_req = approval_service.reject(
+            approval_id=approval_id,
+            reviewer=current_user,
+            rejection_reason=payload.reason
+        )
+    except ApprovalNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ApprovalAuthorizationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except InvalidStateTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ApprovalValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logging.getLogger("aegis.app").error(f"Unexpected error rejecting request {approval_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during rejection processing.")
+
+    # Call resume_execution to halt execution and record rejection audit
+    plan_id = updated_req.get("plan_id")
+    conv_id = updated_req.get("conversation_id")
+    resume_res = await agent_controller.resume_execution(
+        plan_id=plan_id,
+        approval_id=approval_id,
+        current_user=current_user,
+        conversation_id=conv_id
+    )
+
+    return {
+        "success": True,
+        "approval_id": approval_id,
+        "status": ApprovalStatus.REJECTED.value,
+        "message": "Approval request rejected. Execution halted.",
+        "rejection_reason": payload.reason,
+        "execution": resume_res
+    }
+
+
+@app.post("/api/approvals/{approval_id}/resume", tags=["Human-in-the-Loop Approvals"])
+async def resume_approval_execution(
+    approval_id: str,
+    payload: Optional[ApprovalResumeRequest] = None,
+    current_user = Depends(get_current_user)
+):
+    """
+    Explicitly resumes agent execution for an already approved or modified approval request.
+    Enforces department isolation and idempotent completion safety.
+    """
+    req = approval_service.get_request(approval_id)
+    if not req:
+        raise HTTPException(status_code=404, detail=f"Approval request '{approval_id}' was not found.")
+
+    user_attrs = _extract_user_attrs(current_user)
+    role = (user_attrs.get("role") or "user").lower()
+    is_admin = user_attrs.get("is_admin", False)
+    user_dept_id = user_attrs.get("department_id")
+    req_dept_id = req.get("department_id")
+
+    if not is_admin:
+        if role not in AUTHORIZED_REVIEWER_ROLES:
+            raise HTTPException(
+                status_code=403,
+                detail="Operation not permitted for this user role. Reviewer privileges required."
+            )
+        if req_dept_id is not None and user_dept_id is not None and int(req_dept_id) != int(user_dept_id):
+            raise HTTPException(status_code=403, detail="Access denied: cross-department approval resumption is prohibited.")
+
+    plan_id = req.get("plan_id")
+    conv_id = (payload.conversation_id if payload and payload.conversation_id else None) or req.get("conversation_id")
+
+    resume_res = await agent_controller.resume_execution(
+        plan_id=plan_id,
+        approval_id=approval_id,
+        current_user=current_user,
+        conversation_id=conv_id
+    )
+
+    if not resume_res.get("success") and resume_res.get("status") in ("NOT_FOUND", "DENIED", "EXPIRED"):
+        st = resume_res.get("status")
+        code = 404 if st == "NOT_FOUND" else (403 if st == "DENIED" else 400)
+        raise HTTPException(status_code=code, detail=resume_res.get("error", "Cannot resume execution."))
+
+    return {
+        "success": resume_res.get("success", False),
+        "approval_id": approval_id,
+        "status": resume_res.get("status", "COMPLETED"),
+        "execution": resume_res
+    }
 
 class RAGQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
@@ -1983,6 +2844,7 @@ async def get_sandbox_execution(execution_id: str, current_user = Depends(get_cu
     return exec_info
 
 @app.get("/sandbox/artifacts/{artifact_id}/download", tags=["Sandbox Operations"])
+@app.get("/api/sandbox/artifacts/{artifact_id}/download", tags=["Sandbox Operations"])
 async def download_sandbox_artifact(artifact_id: str, current_user = Depends(get_current_user)):
     """Downloads an artifact file generated by a sandbox execution with owner/admin authorization."""
     import sqlite3

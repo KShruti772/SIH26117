@@ -237,14 +237,260 @@ async def change_password(
     )
     return {"status": "success", "message": "Password changed successfully"}
 
+def can_provision_user(
+    current_user: sqlite3.Row,
+    target_role: str,
+    target_department_id: int | None = None,
+    db: sqlite3.Connection = None
+) -> tuple[int, str]:
+    """
+    Centralized server-authoritative authorization gate for user provisioning.
+    
+    Enforces:
+    1. Authenticated user has active admin role.
+    2. Authenticated admin has a non-null department configured.
+    3. Admin's department exists and is active in database.
+    4. Target role is permitted ('user' or 'admin').
+    5. Rejects any attempt to provision for a different department than the admin's.
+    6. Authoritatively binds target user to admin's department.
+    """
+    admin_username = current_user["username"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "username", "unknown")
+    admin_id = current_user["id"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "id", None)
+    admin_role = current_user["role"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "role", "user")
+    admin_dept_id = current_user["department_id"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "department_id", None)
+
+    # Check 1: Must be active admin
+    if admin_role != "admin":
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={"reason": "ROLE_FORBIDDEN", "target_role": target_role}
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={"reason": "ROLE_FORBIDDEN", "target_role": target_role}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted for this user role"
+        )
+
+    # Check 2: Admin department must not be NULL or unconfigured
+    if admin_dept_id is None or (isinstance(admin_dept_id, int) and admin_dept_id <= 0):
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={"reason": "ADMIN_DEPARTMENT_UNCONFIGURED", "username": admin_username}
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={"reason": "ADMIN_DEPARTMENT_UNCONFIGURED", "username": admin_username}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator department is not configured. User provisioning is unavailable until a department is assigned."
+        )
+
+    # Check 3: Query department details
+    cursor = db.cursor()
+    cursor.execute("SELECT id, name, is_active FROM departments WHERE id = ?", (admin_dept_id,))
+    dept_row = cursor.fetchone()
+    if not dept_row:
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={"reason": "ADMIN_DEPARTMENT_NOT_FOUND", "department_id": admin_dept_id}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator department record was not found."
+        )
+
+    admin_dept_name = dept_row[1]
+
+    # Check 4: Rejects client attempt to specify a different department
+    if target_department_id is not None and target_department_id != admin_dept_id:
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={
+                "reason": "CROSS_DEPARTMENT_PROVISIONING_DENIED",
+                "attempted_department_id": target_department_id,
+                "admin_department_id": admin_dept_id,
+                "admin_department_name": admin_dept_name
+            }
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={
+                "reason": "CROSS_DEPARTMENT_PROVISIONING_DENIED",
+                "attempted_department_id": target_department_id,
+                "admin_department_id": admin_dept_id,
+                "admin_department_name": admin_dept_name
+            }
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cross-department provisioning is prohibited. Administrators may only provision users into their own department."
+        )
+
+    # Check 5: Role permissions
+    if target_role not in ["user", "admin"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid target role specified."
+        )
+
+    return admin_dept_id, admin_dept_name
+
+
+def _check_department_admin_scope(
+    current_user: sqlite3.Row,
+    target_username: str,
+    db: sqlite3.Connection,
+    action: str = "manage"
+) -> sqlite3.Row:
+    """
+    Ensures the target user exists and belongs to the administrator's department.
+    Prevents cross-department user modification and IDOR attempts.
+    """
+    admin_username = current_user["username"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "username", "unknown")
+    admin_id = current_user["id"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "id", None)
+    admin_role = current_user["role"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "role", "user")
+    admin_dept_id = current_user["department_id"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "department_id", None)
+    admin_dept_name = current_user["department_name"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "department_name", None)
+
+    if admin_dept_id is None or (isinstance(admin_dept_id, int) and admin_dept_id <= 0):
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={"reason": "ADMIN_DEPARTMENT_UNCONFIGURED", "action": action, "target_username": target_username}
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={"reason": "ADMIN_DEPARTMENT_UNCONFIGURED", "action": action, "target_username": target_username}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator department is not configured."
+        )
+
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM users WHERE username = ?", (target_username,))
+    target_user = cursor.fetchone()
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if not admin_dept_name and admin_dept_id:
+        cursor.execute("SELECT name FROM departments WHERE id = ?", (admin_dept_id,))
+        d_row = cursor.fetchone()
+        if d_row:
+            admin_dept_name = d_row[0]
+
+    is_org_admin = (admin_dept_name == "Administration" or admin_dept_id == 1)
+
+    if not is_org_admin and target_user["department_id"] != admin_dept_id:
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={
+                "reason": "CROSS_DEPARTMENT_USER_ACCESS_DENIED",
+                "action": action,
+                "target_username": target_username,
+                "admin_department_id": admin_dept_id,
+                "target_department_id": target_user["department_id"]
+            }
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="security.auth_router",
+            status="failure",
+            user_id=admin_id,
+            username=admin_username,
+            role=admin_role,
+            metadata={
+                "reason": "CROSS_DEPARTMENT_USER_ACCESS_DENIED",
+                "action": action,
+                "target_username": target_username,
+                "admin_department_id": admin_dept_id,
+                "target_department_id": target_user["department_id"]
+            }
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Cannot manage user belonging to another department."
+        )
+
+    return target_user
+
+
 @router.get("/users", response_model=list[UserResponse])
 async def list_users(
     current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
     db: sqlite3.Connection = Depends(get_db)
 ):
-    """Retrieves all registered users for administration dashboard. Restricted to admin role."""
+    """Retrieves registered users scoped strictly to the administrator's department. Restricted to admin role."""
     cursor = db.cursor()
-    cursor.execute("SELECT * FROM users")
+    admin_dept_id = current_user["department_id"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "department_id", None)
+    admin_dept_name = current_user["department_name"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "department_name", None)
+    if admin_dept_id is None:
+        return []
+        
+    if not admin_dept_name and admin_dept_id:
+        cursor.execute("SELECT name FROM departments WHERE id = ?", (admin_dept_id,))
+        d_row = cursor.fetchone()
+        if d_row:
+            admin_dept_name = d_row[0]
+
+    is_org_admin = (admin_dept_name == "Administration" or admin_dept_id == 1)
+    if is_org_admin:
+        cursor.execute("SELECT * FROM users")
+    else:
+        cursor.execute("SELECT * FROM users WHERE department_id = ?", (admin_dept_id,))
     users = cursor.fetchall()
     return [dict(u) for u in users]
 
@@ -254,7 +500,15 @@ async def provision_user(
     current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
     db: sqlite3.Connection = Depends(get_db)
 ):
-    """Provisions a new user with a temporary password and forces password change on first login."""
+    """Provisions a new user with a temporary password and forces password change on first login. Department is strictly inherited from authenticated admin."""
+    # 1. Authoritative department validation and inheritance
+    dept_id, dept_name = can_provision_user(
+        current_user=current_user,
+        target_role=payload.role,
+        target_department_id=payload.department_id,
+        db=db
+    )
+
     cursor = db.cursor()
     cursor.execute("SELECT id FROM users WHERE username = ?", (payload.username,))
     if cursor.fetchone():
@@ -262,22 +516,6 @@ async def provision_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username already exists"
         )
-    
-    dept_id = payload.department_id
-    dept_name = None
-    if dept_id:
-        cursor.execute("SELECT id, name FROM departments WHERE id = ?", (dept_id,))
-        d_row = cursor.fetchone()
-        if d_row:
-            dept_id = d_row[0]
-            dept_name = d_row[1]
-    if not dept_id:
-        default_dept = "Administration" if payload.role == "admin" else "Operations"
-        cursor.execute("SELECT id, name FROM departments WHERE name = ?", (default_dept,))
-        d_row = cursor.fetchone()
-        if d_row:
-            dept_id = d_row[0]
-            dept_name = d_row[1]
 
     hashed = hash_password(payload.password)
     cursor.execute(
@@ -293,15 +531,31 @@ async def provision_user(
         action="USER_PROVISIONED",
         component="security.auth_router",
         status="success",
-        username=payload.username,
-        metadata={"username": payload.username, "role": payload.role, "department_name": dept_name}
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        metadata={
+            "username": payload.username,
+            "role": payload.role,
+            "department_id": dept_id,
+            "department_name": dept_name,
+            "provisioned_by": current_user["username"]
+        }
     )
     AuditLogger.log_event(
         action="USER_CREATED",
         component="security.auth_router",
         status="success",
-        username=payload.username,
-        metadata={"username": payload.username, "role": payload.role, "department_name": dept_name}
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        metadata={
+            "username": payload.username,
+            "role": payload.role,
+            "department_id": dept_id,
+            "department_name": dept_name,
+            "provisioned_by": current_user["username"]
+        }
     )
     return dict(new_user)
 
@@ -312,7 +566,54 @@ async def update_user_department(
     current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
     db: sqlite3.Connection = Depends(get_db)
 ):
-    """Assigns or changes a user's department. Admin only."""
+    """Assigns or changes a user's department. Admin only within own department scope or executive Administration scope."""
+    target_user = _check_department_admin_scope(current_user, target_username, db, action="change_department")
+
+    admin_dept_id = current_user["department_id"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "department_id", None)
+    admin_dept_name = current_user["department_name"] if isinstance(current_user, (sqlite3.Row, dict)) else getattr(current_user, "department_name", None)
+    if not admin_dept_name and admin_dept_id:
+        cursor = db.cursor()
+        cursor.execute("SELECT name FROM departments WHERE id = ?", (admin_dept_id,))
+        d_row = cursor.fetchone()
+        if d_row:
+            admin_dept_name = d_row[0]
+
+    is_org_admin = (admin_dept_name == "Administration" or admin_dept_id == 1)
+
+    if not is_org_admin:
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="security.auth_router",
+            status="failure",
+            user_id=current_user["id"],
+            username=current_user["username"],
+            role=current_user["role"],
+            metadata={
+                "reason": "DEPARTMENT_TRANSFER_FORBIDDEN",
+                "target_username": target_username,
+                "attempted_department_id": payload.department_id,
+                "admin_department_id": admin_dept_id
+            }
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="security.auth_router",
+            status="failure",
+            user_id=current_user["id"],
+            username=current_user["username"],
+            role=current_user["role"],
+            metadata={
+                "reason": "DEPARTMENT_TRANSFER_FORBIDDEN",
+                "target_username": target_username,
+                "attempted_department_id": payload.department_id,
+                "admin_department_id": admin_dept_id
+            }
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Department reassignment is restricted to executive administrators. Domain administrators cannot alter user departments."
+        )
+
     cursor = db.cursor()
     cursor.execute("SELECT id, name FROM departments WHERE id = ?", (payload.department_id,))
     dept_row = cursor.fetchone()
@@ -320,12 +621,7 @@ async def update_user_department(
         raise HTTPException(status_code=404, detail="Department not found")
     dept_name = dept_row[1]
 
-    cursor.execute("SELECT id, department_name FROM users WHERE username = ?", (target_username,))
-    user = cursor.fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    old_dept = user[1]
+    old_dept = target_user["department_name"]
     cursor.execute(
         "UPDATE users SET department_id = ?, department_name = ? WHERE username = ?",
         (payload.department_id, dept_name, target_username)
@@ -339,7 +635,9 @@ async def update_user_department(
         action="USER_DEPARTMENT_CHANGED",
         component="security.auth_router",
         status="success",
-        username=target_username,
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
         metadata={
             "username": target_username,
             "department_id": payload.department_id,
@@ -356,13 +654,10 @@ async def update_user_status(
     current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
     db: sqlite3.Connection = Depends(get_db)
 ):
-    """Enables or disables target user account."""
+    """Enables or disables target user account within administrator's department scope."""
+    _check_department_admin_scope(current_user, target_username, db, action="update_status")
+
     cursor = db.cursor()
-    cursor.execute("SELECT id FROM users WHERE username = ?", (target_username,))
-    user = cursor.fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-        
     cursor.execute(
         "UPDATE users SET is_active = ? WHERE username = ?",
         (1 if payload.is_active else 0, target_username)
@@ -376,15 +671,19 @@ async def update_user_status(
         action="USER_STATUS_UPDATED",
         component="security.auth_router",
         status="success",
-        username=target_username,
-        metadata={"username": target_username, "is_active": payload.is_active}
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        metadata={"target_username": target_username, "is_active": payload.is_active}
     )
     AuditLogger.log_event(
         action="USER_ENABLED" if payload.is_active else "USER_DISABLED",
         component="security.auth_router",
         status="success",
-        username=target_username,
-        metadata={"username": target_username, "is_active": payload.is_active}
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        metadata={"target_username": target_username, "is_active": payload.is_active}
     )
     return dict(updated)
 
@@ -395,16 +694,37 @@ async def update_user_role(
     current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
     db: sqlite3.Connection = Depends(get_db)
 ):
-    """Updates target user's role assignment."""
+    """Updates target user's role assignment within administrator's department scope."""
     if payload.role not in ["user", "admin"]:
         raise HTTPException(status_code=400, detail="Invalid role specified")
         
+    if target_username == current_user["username"]:
+        AuditLogger.log_event(
+            action="AUTHORIZATION_FAILURE",
+            component="security.auth_router",
+            status="failure",
+            user_id=current_user["id"],
+            username=current_user["username"],
+            role=current_user["role"],
+            metadata={"reason": "SELF_ROLE_CHANGE_FORBIDDEN", "target_username": target_username}
+        )
+        AuditLogger.log_event(
+            action="AUTHORIZATION_DENIED",
+            component="security.auth_router",
+            status="failure",
+            user_id=current_user["id"],
+            username=current_user["username"],
+            role=current_user["role"],
+            metadata={"reason": "SELF_ROLE_CHANGE_FORBIDDEN", "target_username": target_username}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrators cannot modify their own role."
+        )
+
+    _check_department_admin_scope(current_user, target_username, db, action="update_role")
+
     cursor = db.cursor()
-    cursor.execute("SELECT id FROM users WHERE username = ?", (target_username,))
-    user = cursor.fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-        
     cursor.execute(
         "UPDATE users SET role = ? WHERE username = ?",
         (payload.role, target_username)
@@ -418,15 +738,19 @@ async def update_user_role(
         action="USER_ROLE_UPDATED",
         component="security.auth_router",
         status="success",
-        username=target_username,
-        metadata={"username": target_username, "role": payload.role}
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        metadata={"target_username": target_username, "role": payload.role}
     )
     AuditLogger.log_event(
         action="ROLE_CHANGED",
         component="security.auth_router",
         status="success",
-        username=target_username,
-        metadata={"username": target_username, "role": payload.role}
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        metadata={"target_username": target_username, "role": payload.role}
     )
     return dict(updated)
 
@@ -437,13 +761,10 @@ async def admin_reset_password(
     current_user: sqlite3.Row = Depends(RoleChecker(["admin"])),
     db: sqlite3.Connection = Depends(get_db)
 ):
-    """Resets target user password and forces password change on next login."""
+    """Resets target user password and forces password change on next login within administrator's department scope."""
+    _check_department_admin_scope(current_user, target_username, db, action="reset_password")
+
     cursor = db.cursor()
-    cursor.execute("SELECT id FROM users WHERE username = ?", (target_username,))
-    user = cursor.fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-        
     hashed = hash_password(payload.password)
     cursor.execute(
         "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE username = ?",
@@ -458,15 +779,19 @@ async def admin_reset_password(
         action="USER_PASSWORD_RESET",
         component="security.auth_router",
         status="success",
-        username=target_username,
-        metadata={"username": target_username}
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        metadata={"target_username": target_username}
     )
     AuditLogger.log_event(
         action="PASSWORD_RESET",
         component="security.auth_router",
         status="success",
-        username=target_username,
-        metadata={"username": target_username}
+        user_id=current_user["id"],
+        username=current_user["username"],
+        role=current_user["role"],
+        metadata={"target_username": target_username}
     )
     return dict(updated)
 
